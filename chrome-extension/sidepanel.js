@@ -87,7 +87,13 @@ freqSlider.addEventListener('input', () => {
 musicToggle.addEventListener('change', () => {
   const enabled = musicToggle.checked;
   chrome.runtime.sendMessage({ action: 'toggle-music', enabled });
-  musicStatus.textContent = enabled ? 'Loading...' : 'Off';
+  if (!enabled) {
+    // Stop audio immediately in the side panel (don't wait for round-trip)
+    stopMusicAudio();
+    musicStatus.textContent = 'Off';
+  } else {
+    musicStatus.textContent = 'Loading...';
+  }
 });
 
 // ─── Microphone / Voice Input (toggle mode) ─────────────────────────────────
@@ -193,36 +199,65 @@ function handleBackgroundMessage(msg) {
       break;
 
     case 'music-play': {
-      // Stop any existing music
-      if (musicAudio) {
-        musicAudio.pause();
-        musicAudio = null;
-      }
-      // Create audio from base64
+      // Crossfade: fade out old clip over 5s while fading in new clip
       const dataUrl = `data:${msg.mimeType};base64,${msg.audioData}`;
-      musicAudio = new Audio(dataUrl);
-      musicAudio.volume = 0.25;
-      musicAudio.loop = true; // Loop the clip continuously
-      musicAudio.onerror = (e) => {
+      const newAudio = new Audio(dataUrl);
+      newAudio.volume = 0;
+      newAudio.loop = true;
+      newAudio.onerror = (e) => {
         console.error('[Music] Playback error:', e);
         musicStatus.textContent = 'Error';
       };
-      musicAudio.play().then(() => {
+
+      // Fade out old audio over 5 seconds
+      if (musicAudio) {
+        fadeAudio(musicAudio, musicAudio.volume, 0, 5000, () => {
+          musicAudio.pause();
+        });
+      }
+
+      // Start new audio and fade in over 5 seconds
+      newAudio.play().then(() => {
         musicStatus.textContent = msg.mood;
+        fadeAudio(newAudio, 0, 0.25, 5000);
       }).catch(e => {
         console.error('[Music] Play failed:', e);
         musicStatus.textContent = 'Error';
       });
+
+      musicAudio = newAudio;
       break;
     }
 
     case 'music-stop':
-      if (musicAudio) {
-        musicAudio.pause();
-        musicAudio = null;
-      }
+      stopMusicAudio();
       musicStatus.textContent = musicToggle.checked ? 'Paused' : 'Off';
       break;
+  }
+}
+
+// ─── Music Helpers ──────────────────────────────────────────────────────────
+function fadeAudio(audio, from, to, duration, onDone) {
+  const steps = 50;
+  const stepTime = duration / steps;
+  const stepDelta = (to - from) / steps;
+  let step = 0;
+  audio.volume = from;
+  const interval = setInterval(() => {
+    step++;
+    audio.volume = Math.max(0, Math.min(1, from + stepDelta * step));
+    if (step >= steps) {
+      clearInterval(interval);
+      audio.volume = Math.max(0, Math.min(1, to));
+      if (onDone) onDone();
+    }
+  }, stepTime);
+}
+
+function stopMusicAudio() {
+  if (musicAudio) {
+    musicAudio.pause();
+    musicAudio = null;
   }
 }
 

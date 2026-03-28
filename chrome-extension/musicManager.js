@@ -21,7 +21,7 @@ class MusicManager {
     this.pendingMood = null;
     this.isPlaying = false;
     this.generating = false;
-    this.clipCache = new Map(); // mood -> { data: base64, mimeType: string }
+    this.regenTimer = null; // 30s regeneration timer
   }
 
   // ─── Mood Detection (URL heuristics) ──────────────────────────────────────
@@ -81,6 +81,7 @@ class MusicManager {
     console.log(`[Music] Mood change: ${this.currentMood || 'none'} -> ${newMood}`);
 
     if (newMood === 'mute') {
+      this._clearRegenTimer();
       this.pendingMood = null;
       this.currentMood = 'mute';
       this.isPlaying = false;
@@ -101,35 +102,75 @@ class MusicManager {
 
   async _startMood(mood) {
     this.currentMood = mood;
+    this._clearRegenTimer();
 
-    // Check cache first
-    let cached = this.clipCache.get(mood);
+    if (this.generating) {
+      console.log('[Music] Already generating, skipping');
+      return;
+    }
 
-    if (!cached) {
-      if (this.generating) {
-        console.log('[Music] Already generating, skipping');
-        return;
-      }
-      cached = await this._generateClip(mood);
-      if (!cached) {
-        console.error('[Music] Failed to generate clip for:', mood);
-        return;
-      }
-      this.clipCache.set(mood, cached);
+    const clip = await this._generateClip(mood);
+    if (!clip) {
+      console.error('[Music] Failed to generate clip for:', mood);
+      return;
+    }
 
-      // Check if mood changed while we were generating
-      if (this.pendingMood && this.pendingMood !== mood) {
-        const next = this.pendingMood;
-        this.pendingMood = null;
-        await this._startMood(next);
-        return;
-      }
+    // Check if mood changed while we were generating
+    if (this.pendingMood && this.pendingMood !== mood) {
+      const next = this.pendingMood;
+      this.pendingMood = null;
+      await this._startMood(next);
+      return;
     }
 
     this.isPlaying = true;
     this.pendingMood = null;
-    this.onPlayAudio(mood, cached.data, cached.mimeType);
-    console.log(`[Music] Playing: ${mood} (looping in side panel)`);
+    this.onPlayAudio(mood, clip.data, clip.mimeType);
+    console.log(`[Music] Playing: ${mood}`);
+
+    // Schedule next clip generation in 30s (crossfades in side panel)
+    this._scheduleRegen();
+  }
+
+  _scheduleRegen() {
+    this._clearRegenTimer();
+    this.regenTimer = setTimeout(() => this._regenClip(), 30000);
+  }
+
+  _clearRegenTimer() {
+    if (this.regenTimer) {
+      clearTimeout(this.regenTimer);
+      this.regenTimer = null;
+    }
+  }
+
+  async _regenClip() {
+    if (!this.enabled || !this.isPlaying || !this.currentMood || this.currentMood === 'mute') return;
+
+    // If mood changed while waiting, switch to the new mood
+    if (this.pendingMood) {
+      const next = this.pendingMood;
+      this.pendingMood = null;
+      await this._startMood(next);
+      return;
+    }
+
+    const mood = this.currentMood;
+    console.log(`[Music] Regenerating fresh clip for: "${mood}"`);
+
+    const clip = await this._generateClip(mood);
+    if (!clip) {
+      console.error('[Music] Regen failed, scheduling retry');
+      this._scheduleRegen();
+      return;
+    }
+
+    // Check if still the same mood after generation
+    if (this.currentMood !== mood || !this.enabled) return;
+
+    this.onPlayAudio(mood, clip.data, clip.mimeType);
+    console.log(`[Music] Fresh clip playing: ${mood}`);
+    this._scheduleRegen();
   }
 
   // ─── Lyria API call ───────────────────────────────────────────────────────
@@ -184,6 +225,7 @@ class MusicManager {
   setEnabled(enabled) {
     this.enabled = enabled;
     if (!enabled) {
+      this._clearRegenTimer();
       this.isPlaying = false;
       this.pendingMood = null;
       this.onStopAudio();
@@ -191,6 +233,7 @@ class MusicManager {
   }
 
   stop() {
+    this._clearRegenTimer();
     this.enabled = false;
     this.isPlaying = false;
     this.pendingMood = null;

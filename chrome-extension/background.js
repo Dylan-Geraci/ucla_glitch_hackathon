@@ -20,8 +20,9 @@ CRITICAL RULES — follow these exactly:
 1. When the user asks a QUESTION about the page ("what is", "what's the difference", "explain", "tell me", "why", "how", "compare"), respond with text. You already have the page text, so read it and answer directly.
 2. When the user says "highlight" or "show me where", use the highlight_answer tool.
 3. When the user says "search for", "look up", "go to", "open", or "navigate to", you MUST use the navigate_to_url tool immediately. Use https://www.google.com/search?q=QUERY for searches. Do NOT tell the user to search themselves — YOU do it.
-4. When proactively commenting (not asked), keep it to 1-2 sentences.
-5. If page text says "No page text available", do NOT make up what's on the page. Just say you can't see the page content.
+4. When the user asks you to click, press, select, enable, disable, toggle, or interact with a button/link/checkbox/radio on the page, use the click_element tool with the visible text label of the element.
+5. When proactively commenting (not asked), keep it to 1-2 sentences.
+6. If page text says "No page text available", do NOT make up what's on the page. Just say you can't see the page content.
 
 Your response will be spoken aloud — keep it concise (2-4 sentences for answers).`;
 
@@ -58,6 +59,17 @@ const TOOL_DECLARATIONS = [
     name: 'reload_page',
     description: 'Reload the current page.',
     parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'click_element',
+    description: 'Click a button, link, radio button, checkbox, or other interactive element on the page. Describe the element by its visible text label or nearby text.',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'The visible text label of the element to click (e.g. "Disabled", "Submit", "Hide").' },
+      },
+      required: ['text'],
+    },
   },
 ];
 
@@ -217,6 +229,10 @@ async function executeTool(name, args) {
       case 'reload_page':
         await chrome.tabs.reload(tab.id);
         return 'Page reloaded';
+      case 'click_element': {
+        const res = await chrome.tabs.sendMessage(tab.id, { type: 'click_element', text: args.text });
+        return res?.found ? `Clicked "${args.text}"` : `Could not find element with text "${args.text}"`;
+      }
       case 'get_page_text': {
         const res = await chrome.tabs.sendMessage(tab.id, { type: 'get_page_text' });
         return res?.text || '';

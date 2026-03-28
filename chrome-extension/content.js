@@ -9,6 +9,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ found: result });
   } else if (msg.type === 'get_page_text') {
     sendResponse({ text: document.body.innerText.slice(0, 30000) });
+  } else if (msg.type === 'click_element') {
+    const result = clickElement(msg.text);
+    sendResponse({ found: result });
   } else if (msg.type === 'inject_annotation') {
     injectAnnotation(msg.text, msg.x, msg.y, msg.duration);
     sendResponse({ ok: true });
@@ -61,6 +64,80 @@ function scrollToText(text) {
     }
   }
   return false;
+}
+
+function clickElement(searchText) {
+  const normalize = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const target = normalize(searchText);
+
+  // Clickable elements: buttons, links, inputs, labels, radio buttons, checkboxes, etc.
+  const selectors = 'button, a, input[type="button"], input[type="submit"], input[type="radio"], input[type="checkbox"], label, select, [role="button"], [role="radio"], [role="checkbox"], [role="tab"], [role="menuitem"], [onclick]';
+  const candidates = document.querySelectorAll(selectors);
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const el of candidates) {
+    // Check visible text, value, aria-label, title
+    const texts = [
+      el.innerText,
+      el.value,
+      el.getAttribute('aria-label'),
+      el.title,
+      el.getAttribute('alt'),
+    ].filter(Boolean).map(normalize);
+
+    for (const t of texts) {
+      // Exact match
+      if (t === target) { best = el; bestScore = 100; break; }
+      // Contains match
+      if (t.includes(target) || target.includes(t)) {
+        const score = target.length / Math.max(t.length, 1) * 50;
+        if (score > bestScore) { best = el; bestScore = score; }
+      }
+    }
+    if (bestScore === 100) break;
+
+    // Also check associated label text for radio/checkbox inputs
+    if (el.tagName === 'LABEL') {
+      const labelText = normalize(el.innerText);
+      if (labelText === target || labelText.includes(target)) {
+        best = el;
+        bestScore = 100;
+        break;
+      }
+    }
+  }
+
+  if (!best) {
+    // Fallback: search all elements by text content
+    const all = document.querySelectorAll('*');
+    for (const el of all) {
+      if (el.children.length > 3) continue; // skip containers
+      const t = normalize(el.innerText || '');
+      if (t === target && (el.click || el.tagName === 'LABEL')) {
+        best = el;
+        break;
+      }
+    }
+  }
+
+  if (!best) return false;
+
+  // Flash the element briefly to show what was clicked
+  const prev = best.style.cssText;
+  best.style.cssText += ';outline:3px solid #00E5FF !important;box-shadow:0 0 20px rgba(0,229,255,0.5) !important;transition:all 0.3s ease !important;';
+  best.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  // For labels with a "for" attribute, click the associated input
+  if (best.tagName === 'LABEL' && best.htmlFor) {
+    const input = document.getElementById(best.htmlFor);
+    if (input) input.click();
+  }
+
+  best.click();
+  setTimeout(() => { best.style.cssText = prev; }, 2000);
+  return true;
 }
 
 function injectAnnotation(text, x, y, duration = 4000) {
