@@ -1,0 +1,19 @@
+{
+  "name": "browsing-agent",
+  "version": "1.0.0",
+  "description": "AI inner voice browser agent powered by Gemini Live",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "ELECTRON_DEV=true electron ."
+  },
+  "dependencies": {
+    "@google/genai": "^0.7.0",
+    "electron-store": "^8.1.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0"
+  },
+  "author": "",
+  "license": "MIT"
+}

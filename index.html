@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Browsing Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:        #080810;
+      --surface:   #0f0f1a;
+      --border:    #1e1e32;
+      --accent:    #3dffa0;
+      --accent2:   #7b61ff;
+      --text:      #d4d4e8;
+      --muted:     #555570;
+      --danger:    #ff4d6a;
+      --glow:      0 0 20px rgba(61,255,160,0.25);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Space Grotesk', sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      user-select: none;
+      -webkit-app-region: no-drag;
+    }
+
+    /* ── Browser viewport placeholder (BrowserView renders here via Electron) ── */
+    #browser-viewport {
+      flex: 1;
+      background: #111;
+      position: relative;
+    }
+
+    #browser-viewport .loading-indicator {
+      position: absolute;
+      bottom: 8px;
+      right: 12px;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    #browser-viewport .loading-indicator.active { opacity: 1; animation: pulse 1s infinite; }
+
+    /* ── Control Bar ──────────────────────────────────────────────────────────── */
+    #control-bar {
+      height: 120px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 10px 14px 8px;
+      gap: 8px;
+      position: relative;
+      z-index: 100;
+    }
+
+    /* Top row: nav + URL bar */
+    .nav-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .nav-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      width: 28px; height: 28px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+      flex-shrink: 0;
+    }
+    .nav-btn:hover { border-color: var(--accent); color: var(--accent); box-shadow: var(--glow); }
+
+    #url-bar {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      padding: 5px 12px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    #url-bar:focus { border-color: var(--accent); box-shadow: var(--glow); }
+
+    /* Bottom row: agent controls */
+    .agent-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Status dot */
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .status-dot.connected { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 2s infinite; }
+    .status-dot.recording { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: pulse 0.6s infinite; }
+
+    /* Agent toggle */
+    .toggle-label {
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .toggle-switch {
+      position: relative;
+      width: 36px; height: 20px;
+      flex-shrink: 0;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-switch .slider {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      border-radius: 20px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    .toggle-switch .slider::before {
+      content: '';
+      position: absolute;
+      width: 14px; height: 14px;
+      left: 3px; bottom: 3px;
+      background: var(--muted);
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .toggle-switch input:checked + .slider { background: rgba(61,255,160,0.2); border: 1px solid var(--accent); }
+    .toggle-switch input:checked + .slider::before { transform: translateX(16px); background: var(--accent); }
+
+    /* Frequency slider */
+    .freq-label { font-size: 10px; color: var(--muted); white-space: nowrap; }
+    #freq-slider {
+      width: 80px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    /* Mic button */
+    #mic-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 14px;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+      flex-shrink: 0;
+    }
+    #mic-btn:hover { border-color: var(--accent); color: var(--accent); }
+    #mic-btn.recording { border-color: var(--danger); color: var(--danger); background: rgba(255,77,106,0.08); box-shadow: 0 0 12px rgba(255,77,106,0.3); }
+
+    /* Commentary feed */
+    #commentary {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--accent);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      display: flex;
+      align-items: center;
+      min-width: 0;
+    }
+    #commentary.idle { color: var(--muted); font-style: italic; }
+
+    /* API key setup overlay */
+    #setup-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(8,8,16,0.96);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      backdrop-filter: blur(4px);
+    }
+    #setup-overlay.hidden { display: none; }
+
+    .setup-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 36px 40px;
+      width: 420px;
+      text-align: center;
+    }
+    .setup-card h2 {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+    .setup-card p {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 24px;
+      line-height: 1.6;
+    }
+    .setup-card input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      padding: 10px 14px;
+      outline: none;
+      margin-bottom: 16px;
+    }
+    .setup-card input:focus { border-color: var(--accent); }
+    .setup-card button {
+      width: 100%;
+      background: var(--accent);
+      color: #000;
+      border: none;
+      border-radius: 8px;
+      padding: 11px;
+      font-family: 'Space Grotesk', sans-serif;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .setup-card button:hover { opacity: 0.85; }
+    .setup-card .error { color: var(--danger); font-size: 12px; margin-top: 8px; }
+
+    /* Screenshot flash */
+    @keyframes screenshotFlash {
+      0%   { opacity: 0.4; }
+      100% { opacity: 0; }
+    }
+    #screenshot-flash {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: rgba(61,255,160,0.06);
+      opacity: 0;
+      z-index: 50;
+    }
+    #screenshot-flash.flash { animation: screenshotFlash 0.5s ease-out; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Setup Overlay -->
+  <div id="setup-overlay">
+    <div class="setup-card">
+      <h2>⬡ Browsing Agent</h2>
+      <p>Enter your Google Gemini API key to activate your AI inner voice. Your key is stored locally and never sent anywhere except Google's API.</p>
+      <input type="password" id="api-key-input" placeholder="AIza..." autocomplete="off" />
+      <button id="connect-btn">Connect Agent</button>
+      <div class="error" id="setup-error"></div>
+    </div>
+  </div>
+
+  <!-- Screenshot flash overlay -->
+  <div id="screenshot-flash"></div>
+
+  <!-- Browser viewport (BrowserView renders behind this) -->
+  <div id="browser-viewport">
+    <div class="loading-indicator" id="loading-dot"></div>
+  </div>
+
+  <!-- Control Bar -->
+  <div id="control-bar">
+    <!-- Navigation Row -->
+    <div class="nav-row">
+      <button class="nav-btn" id="back-btn" title="Back">←</button>
+      <button class="nav-btn" id="fwd-btn" title="Forward">→</button>
+      <button class="nav-btn" id="reload-btn" title="Reload">↻</button>
+      <input type="text" id="url-bar" placeholder="Search or type a URL…" spellcheck="false" />
+    </div>
+
+    <!-- Agent Controls Row -->
+    <div class="agent-row">
+      <div class="status-dot" id="status-dot"></div>
+
+      <label class="toggle-label">Agent</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="agent-toggle" />
+        <span class="slider"></span>
+      </label>
+
+      <span class="freq-label">Quiet</span>
+      <input type="range" id="freq-slider" min="0" max="1" step="0.01" value="0.3" />
+      <span class="freq-label">Chatty</span>
+
+      <button id="mic-btn" title="Hold to speak">🎙</button>
+
+      <div id="commentary" class="idle">Agent standing by…</div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
