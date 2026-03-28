@@ -88,7 +88,7 @@ class GeminiLiveClient {
   async connect() {
     try {
       this.session = await this.ai.live.connect({
-        model: '',
+        model: 'gemini-3.1-flash-lite-preview',
         config: {
           responseModalities: [Modality.AUDIO],
           systemInstruction: SYSTEM_PROMPT,
