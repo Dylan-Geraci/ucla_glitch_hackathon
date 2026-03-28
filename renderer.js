@@ -207,11 +207,15 @@ window.agent.on('agent-text', ({ text, commands }) => {
 });
 
 window.agent.on('agent-audio', ({ data, mimeType }) => {
+  setCommentary('Speaking…', false);
   enqueueAudio(data, mimeType);
 });
 
 window.agent.on('agent-turn-complete', () => {
-  // Nothing extra needed
+  // If no audio queued, turn is text-only or empty — reset commentary
+  if (audioQueue.length === 0 && !isPlayingAudio) {
+    setCommentary('Agent active — watching…', false);
+  }
 });
 
 window.agent.on('agent-error', ({ error }) => {
@@ -275,7 +279,12 @@ async function playNextAudio() {
     source.connect(audioCtx.destination);
     source.onended = () => {
       audioCtx.close();
-      playNextAudio();
+      if (audioQueue.length === 0) {
+        isPlayingAudio = false;
+        setCommentary('Agent active — watching…', false);
+      } else {
+        playNextAudio();
+      }
     };
     source.start();
   } catch (e) {

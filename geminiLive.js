@@ -88,7 +88,7 @@ class GeminiLiveClient {
   async connect() {
     try {
       this.session = await this.ai.live.connect({
-        model: 'gemini-2.0-flash-live-001',
+        model: '',
         config: {
           responseModalities: [Modality.AUDIO],
           systemInstruction: SYSTEM_PROMPT,
@@ -241,7 +241,7 @@ class GeminiLiveClient {
       await this.session.sendRealtimeInput({
         video: {
           data: base64Image.replace(/^data:image\/\w+;base64,/, ''),
-          mimeType: 'image/png',
+          mimeType: 'image/jpeg',
         },
       });
     } catch (e) {
@@ -252,8 +252,13 @@ class GeminiLiveClient {
   async sendAudio(audioBase64, mimeType = 'audio/pcm;rate=16000') {
     if (!this.session || !this.connected) return { error: 'Not connected' };
     try {
-      await this.session.sendRealtimeInput({
-        audio: { data: audioBase64, mimeType },
+      // Push-to-talk: send the complete recording as a finished turn, not a stream chunk.
+      // sendRealtimeInput waits for VAD on a continuing stream — it will hang on a single blob.
+      await this.session.sendMessage({
+        turns: [{
+          role: 'user',
+          parts: [{ inlineData: { mimeType, data: audioBase64 } }],
+        }],
       });
       return { success: true };
     } catch (e) {
