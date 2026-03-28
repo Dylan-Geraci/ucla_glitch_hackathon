@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Allow Microphone</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      text-align: center;
+      gap: 16px;
+    }
+  </style>
+</head>
+<body>
+  <p>Click below to grant microphone access to Browsing Agent.</p>
+  <button id="allow-btn" style="background:var(--accent);color:#000;border:none;border-radius:8px;padding:12px 24px;font-size:14px;font-weight:600;cursor:pointer;">Allow Microphone</button>
+  <p id="status"></p>
+  <script src="mic-permission.js"></script>
+</body>
+</html>

@@ -1,0 +1,284 @@
+:root {
+  --bg:        #080810;
+  --surface:   #0f0f1a;
+  --border:    #1e1e32;
+  --accent:    #3dffa0;
+  --accent2:   #7b61ff;
+  --text:      #d4d4e8;
+  --muted:     #555570;
+  --danger:    #ff4d6a;
+  --glow:      0 0 20px rgba(61,255,160,0.25);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Space Grotesk', sans-serif;
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+}
+
+/* ── Setup Overlay ───────────────────────────────────────────────────────── */
+#setup-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8,8,16,0.96);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(4px);
+}
+#setup-overlay.hidden { display: none; }
+
+.setup-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px 24px;
+  width: 100%;
+  max-width: 340px;
+  text-align: center;
+}
+.setup-card h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.setup-card p {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 18px;
+  line-height: 1.5;
+}
+.setup-card input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  padding: 9px 12px;
+  outline: none;
+  margin-bottom: 12px;
+}
+.setup-card input:focus { border-color: var(--accent); }
+.setup-card button {
+  width: 100%;
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  padding: 10px;
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.setup-card button:hover { opacity: 0.85; }
+.setup-card .error { color: var(--danger); font-size: 11px; margin-top: 6px; }
+
+/* ── Main Panel ──────────────────────────────────────────────────────────── */
+#main-panel {
+  display: none;
+  flex-direction: column;
+  height: 100vh;
+  padding: 12px;
+  gap: 12px;
+}
+#main-panel.active {
+  display: flex;
+}
+
+/* ── Agent Controls ──────────────────────────────────────────────────────── */
+.controls-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Status dot */
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+.status-dot.connected {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  animation: pulse 2s infinite;
+}
+.status-dot.recording {
+  background: var(--danger);
+  box-shadow: 0 0 8px var(--danger);
+  animation: pulse 0.6s infinite;
+}
+
+/* Toggle */
+.toggle-label {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.toggle-switch {
+  position: relative;
+  width: 36px; height: 20px;
+  flex-shrink: 0;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-switch .slider {
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: 0.2s;
+}
+.toggle-switch .slider::before {
+  content: '';
+  position: absolute;
+  width: 14px; height: 14px;
+  left: 3px; bottom: 3px;
+  background: var(--muted);
+  border-radius: 50%;
+  transition: 0.2s;
+}
+.toggle-switch input:checked + .slider {
+  background: rgba(61,255,160,0.2);
+  border: 1px solid var(--accent);
+}
+.toggle-switch input:checked + .slider::before {
+  transform: translateX(16px);
+  background: var(--accent);
+}
+
+/* Frequency slider */
+.freq-label { font-size: 10px; color: var(--muted); white-space: nowrap; }
+#freq-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Mic button */
+#mic-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  align-self: center;
+}
+#mic-btn:hover { border-color: var(--accent); color: var(--accent); }
+#mic-btn.recording {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(255,77,106,0.08);
+  box-shadow: 0 0 12px rgba(255,77,106,0.3);
+}
+
+/* ── Commentary ──────────────────────────────────────────────────────────── */
+#commentary {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--accent);
+  line-height: 1.5;
+  min-height: 60px;
+  flex: 1;
+  overflow-y: auto;
+  word-wrap: break-word;
+}
+#commentary.idle { color: var(--muted); font-style: italic; }
+
+/* ── Text Input ──────────────────────────────────────────────────────────── */
+.text-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+#text-input {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  padding: 8px 12px;
+  outline: none;
+}
+#text-input:focus { border-color: var(--accent); box-shadow: var(--glow); }
+#text-input::placeholder { color: var(--muted); }
+
+#send-btn {
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+#send-btn:hover { opacity: 0.85; }
+
+/* ── Key Reset ───────────────────────────────────────────────────────────── */
+#key-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-left: auto;
+}
+#key-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Screenshot Flash ────────────────────────────────────────────────────── */
+@keyframes screenshotFlash {
+  0%   { opacity: 0.4; }
+  100% { opacity: 0; }
+}
+#screenshot-flash {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: rgba(61,255,160,0.06);
+  opacity: 0;
+  z-index: 50;
+}
+#screenshot-flash.flash { animation: screenshotFlash 0.5s ease-out; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
