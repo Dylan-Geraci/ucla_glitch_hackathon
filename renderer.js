@@ -11,6 +11,7 @@ const backBtn        = document.getElementById('back-btn');
 const fwdBtn         = document.getElementById('fwd-btn');
 const reloadBtn      = document.getElementById('reload-btn');
 const urlBar         = document.getElementById('url-bar');
+const keyBtn         = document.getElementById('key-btn');
 
 const statusDot      = document.getElementById('status-dot');
 const agentToggle    = document.getElementById('agent-toggle');
@@ -61,6 +62,16 @@ window.addEventListener('DOMContentLoaded', async () => {
 // Allow pressing Enter on API key field
 apiKeyInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') connectBtn.click();
+});
+
+// ─── API Key Reset ────────────────────────────────────────────────────────────
+keyBtn.addEventListener('click', () => {
+  localStorage.removeItem('gemini_api_key');
+  setupOverlay.classList.remove('hidden');
+  apiKeyInput.value = '';
+  connectBtn.textContent = 'Connect Agent';
+  connectBtn.disabled = false;
+  setupError.textContent = '';
 });
 
 // ─── Navigation ───────────────────────────────────────────────────────────────
