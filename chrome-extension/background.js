@@ -16,13 +16,17 @@ Your personality:
 - Occasionally dry humor, always substantive
 - You speak in short, natural sentences — never walls of text
 
-CRITICAL RULES — follow these exactly:
-1. When the user asks a QUESTION about the page ("what is", "what's the difference", "explain", "tell me", "why", "how", "compare"), respond with text. You already have the page text, so read it and answer directly.
-2. When the user says "highlight" or "show me where", use the highlight_answer tool.
-3. When the user says "search for", "look up", "go to", "open", or "navigate to", you MUST use the navigate_to_url tool immediately. Use https://www.google.com/search?q=QUERY for searches. Do NOT tell the user to search themselves — YOU do it.
-4. When the user asks you to click, press, select, enable, disable, toggle, or interact with a button/link/checkbox/radio on the page, use the click_element tool with the visible text label of the element.
-5. When proactively commenting (not asked), keep it to 1-2 sentences.
-6. If page text says "No page text available", do NOT make up what's on the page. Just say you can't see the page content.
+CRITICAL RULES — follow these in priority order (check higher rules first):
+1. TAB MANAGEMENT (check these BEFORE navigation):
+   - "close tab" / "close this tab" → use the close_tab tool. Do NOT use click_element — close_tab is a browser action, not a page button.
+   - "switch tab" / "switch to the X tab" / "go to my X tab" → use the switch_tab tool to switch to an already-open tab. Do NOT use navigate_to_url.
+   - "open X in a new tab" / "new tab" → use the open_new_tab tool. Do NOT use navigate_to_url.
+2. When the user asks a QUESTION about the page ("what is", "what's the difference", "explain", "tell me", "why", "how", "compare"), respond with text. You already have the page text, so read it and answer directly.
+3. When the user says "highlight" or "show me where", use the highlight_answer tool.
+4. When the user says "search for", "look up", "go to", "open", or "navigate to" (and they are NOT referring to an already-open tab), use the navigate_to_url tool. Use https://www.google.com/search?q=QUERY for searches. Do NOT tell the user to search themselves — YOU do it.
+5. When the user asks you to click, press, select, enable, disable, toggle, or interact with a button/link/checkbox/radio on the page, use the click_element tool with the visible text label of the element.
+6. When proactively commenting (not asked), keep it to 1-2 sentences.
+7. If page text says "No page text available", do NOT make up what's on the page. Just say you can't see the page content.
 
 Your response will be spoken aloud — keep it concise (2-4 sentences for answers).`;
 
@@ -69,6 +73,33 @@ const TOOL_DECLARATIONS = [
         text: { type: 'string', description: 'The visible text label of the element to click (e.g. "Disabled", "Submit", "Hide").' },
       },
       required: ['text'],
+    },
+  },
+  {
+    name: 'open_new_tab',
+    description: 'Open a URL in a new browser tab.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Full URL to open in a new tab (include https://).' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'close_tab',
+    description: 'Close the current browser tab.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'switch_tab',
+    description: 'Switch to another open tab by matching its title or URL. Use a keyword from the tab title or domain.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'A keyword to match against tab titles or URLs (e.g. "YouTube", "google", "reddit").' },
+      },
+      required: ['query'],
     },
   },
 ];
@@ -232,6 +263,27 @@ async function executeTool(name, args) {
       case 'click_element': {
         const res = await chrome.tabs.sendMessage(tab.id, { type: 'click_element', text: args.text });
         return res?.found ? `Clicked "${args.text}"` : `Could not find element with text "${args.text}"`;
+      }
+      case 'open_new_tab': {
+        let url = args.url;
+        if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
+        await chrome.tabs.create({ url });
+        return `Opened ${url} in a new tab`;
+      }
+      case 'close_tab': {
+        await chrome.tabs.remove(tab.id);
+        return 'Closed the current tab';
+      }
+      case 'switch_tab': {
+        const allTabs = await chrome.tabs.query({ currentWindow: true });
+        const q = args.query.toLowerCase();
+        const match = allTabs.find(t =>
+          (t.title && t.title.toLowerCase().includes(q)) ||
+          (t.url && t.url.toLowerCase().includes(q))
+        );
+        if (!match) return `No open tab matching "${args.query}"`;
+        await chrome.tabs.update(match.id, { active: true });
+        return `Switched to tab: ${match.title}`;
       }
       case 'get_page_text': {
         const res = await chrome.tabs.sendMessage(tab.id, { type: 'get_page_text' });
@@ -577,10 +629,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
     }
 
-    case 'music-ended': {
-      if (musicManager) musicManager.onClipEnded();
+    case 'music-ended':
+      // No longer needed — regen is timer-based
       break;
-    }
   }
 });
 

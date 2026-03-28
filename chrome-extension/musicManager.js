@@ -4,9 +4,8 @@
 // Flow:
 //   1. background.js detects tab URL change → calls onCycle(url)
 //   2. Mood detection maps URL to focus/chill/ambient/mute
-//   3. If mood changed, generate clip via Lyria API (or use cache)
-//   4. Send audio base64 to side panel for playback via onPlayAudio callback
-//   5. Side panel plays it; notifies background when clip ends → loop or switch
+//   3. Generate clip via Lyria API, send base64 to side panel for playback
+//   4. Every 30s, generate a fresh clip and crossfade (handled by side panel)
 
 const LYRIA_MODEL = 'lyria-3-clip-preview';
 const LYRIA_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -18,10 +17,8 @@ class MusicManager {
     this.onStopAudio = onStopAudio;   // callback()
     this.enabled = false;
     this.currentMood = null;
-    this.pendingMood = null;
-    this.isPlaying = false;
-    this.generating = false;
-    this.regenTimer = null; // 30s regeneration timer
+    this.regenTimer = null;
+    this.sessionId = 0; // Incremented on each fresh start to cancel stale async work
   }
 
   // ─── Mood Detection (URL heuristics) ──────────────────────────────────────
@@ -31,14 +28,12 @@ class MusicManager {
     try { domain = new URL(url).hostname.toLowerCase(); }
     catch { return 'chill'; }
 
-    // Mute — sites with their own audio
     const muteDomains = [
       'youtube.com', 'netflix.com', 'spotify.com', 'twitch.tv',
       'soundcloud.com', 'music.apple.com', 'hulu.com', 'disneyplus.com',
     ];
     if (muteDomains.some(d => domain.includes(d))) return 'mute';
 
-    // Focus — dev & productivity
     const focusDomains = [
       'github.com', 'gitlab.com', 'stackoverflow.com', 'codepen.io',
       'replit.com', 'docs.google.com', 'sheets.google.com', 'notion.so',
@@ -46,14 +41,12 @@ class MusicManager {
     ];
     if (focusDomains.some(d => domain.includes(d))) return 'focus';
 
-    // Ambient — reading & knowledge
     const ambientDomains = [
       'wikipedia.org', 'medium.com', 'arxiv.org', 'scholar.google.com',
       'bbc.com', 'nytimes.com', 'reuters.com', 'cnn.com', 'theguardian.com',
     ];
     if (ambientDomains.some(d => domain.includes(d))) return 'ambient';
 
-    // Chill — social & shopping
     const chillDomains = [
       'reddit.com', 'twitter.com', 'x.com', 'instagram.com', 'facebook.com',
       'amazon.com', 'ebay.com', 'etsy.com',
@@ -63,7 +56,7 @@ class MusicManager {
     return 'chill';
   }
 
-  // Lyria prompt templates — instrumental only, with variations for variety
+  // Lyria prompt variations for variety
   static moodPromptBases = {
     focus: [
       'lo-fi instrumental hip hop beat, calm study music, soft piano and drums',
@@ -99,103 +92,76 @@ class MusicManager {
 
   async onCycle(url) {
     if (!this.enabled) return;
-
     const newMood = MusicManager.detectMood(url);
     if (newMood === this.currentMood) return;
 
     console.log(`[Music] Mood change: ${this.currentMood || 'none'} -> ${newMood}`);
 
     if (newMood === 'mute') {
-      this._clearRegenTimer();
-      this.pendingMood = null;
+      this._stopSession();
       this.currentMood = 'mute';
-      this.isPlaying = false;
-      this.onStopAudio();
       return;
     }
 
-    if (!this.isPlaying && !this.generating) {
-      await this._startMood(newMood);
-    } else {
-      // Something playing or generating — queue the new mood
-      this.pendingMood = newMood;
-      console.log(`[Music] Queued "${newMood}" — waiting for current clip to finish`);
-    }
+    // Start a brand new session for the new mood
+    this._startSession(newMood);
   }
 
-  // ─── Generate + send clip to side panel ───────────────────────────────────
+  // ─── Called when toggling on — always starts fresh ────────────────────────
 
-  async _startMood(mood) {
+  async startForUrl(url) {
+    if (!this.enabled) return;
+    const mood = MusicManager.detectMood(url);
+    if (mood === 'mute') return;
+    this._startSession(mood);
+  }
+
+  // ─── Session management ───────────────────────────────────────────────────
+
+  _startSession(mood) {
+    // Increment session ID — any in-flight work from old sessions will bail out
+    this.sessionId++;
+    const sid = this.sessionId;
+    this._clearRegenTimer();
     this.currentMood = mood;
+
+    console.log(`[Music] Starting session ${sid} for mood: ${mood}`);
+
+    // Fire and forget — the session ID guards all continuations
+    this._generateAndPlay(mood, sid);
+  }
+
+  _stopSession() {
+    this.sessionId++; // Invalidate any in-flight work
     this._clearRegenTimer();
+    this.currentMood = null;
+    this.onStopAudio();
+  }
 
-    if (this.generating) {
-      console.log('[Music] Already generating, skipping');
-      return;
-    }
-
+  async _generateAndPlay(mood, sid) {
     const clip = await this._generateClip(mood);
+
+    // Bail if session changed while we were generating
+    if (this.sessionId !== sid) {
+      console.log(`[Music] Session ${sid} expired, discarding clip`);
+      return;
+    }
+
     if (!clip) {
-      console.error('[Music] Failed to generate clip for:', mood);
+      console.error(`[Music] Session ${sid}: generation failed for "${mood}"`);
       return;
     }
-
-    // Check if mood changed while we were generating
-    if (this.pendingMood && this.pendingMood !== mood) {
-      const next = this.pendingMood;
-      this.pendingMood = null;
-      await this._startMood(next);
-      return;
-    }
-
-    this.isPlaying = true;
-    this.pendingMood = null;
-    this.onPlayAudio(mood, clip.data, clip.mimeType);
-    console.log(`[Music] Playing: ${mood}`);
-
-    // Schedule next clip generation in 30s (crossfades in side panel)
-    this._scheduleRegen();
-  }
-
-  _scheduleRegen() {
-    this._clearRegenTimer();
-    this.regenTimer = setTimeout(() => this._regenClip(), 30000);
-  }
-
-  _clearRegenTimer() {
-    if (this.regenTimer) {
-      clearTimeout(this.regenTimer);
-      this.regenTimer = null;
-    }
-  }
-
-  async _regenClip() {
-    if (!this.enabled || !this.isPlaying || !this.currentMood || this.currentMood === 'mute') return;
-
-    // If mood changed while waiting, switch to the new mood
-    if (this.pendingMood) {
-      const next = this.pendingMood;
-      this.pendingMood = null;
-      await this._startMood(next);
-      return;
-    }
-
-    const mood = this.currentMood;
-    console.log(`[Music] Regenerating fresh clip for: "${mood}"`);
-
-    const clip = await this._generateClip(mood);
-    if (!clip) {
-      console.error('[Music] Regen failed, scheduling retry');
-      this._scheduleRegen();
-      return;
-    }
-
-    // Check if still the same mood after generation
-    if (this.currentMood !== mood || !this.enabled) return;
 
     this.onPlayAudio(mood, clip.data, clip.mimeType);
-    console.log(`[Music] Fresh clip playing: ${mood}`);
-    this._scheduleRegen();
+    console.log(`[Music] Session ${sid}: playing "${mood}"`);
+
+    // Schedule next fresh clip in 30s
+    this._clearRegenTimer();
+    this.regenTimer = setTimeout(() => {
+      if (this.sessionId !== sid || !this.enabled) return;
+      console.log(`[Music] Session ${sid}: regenerating fresh clip`);
+      this._generateAndPlay(mood, sid);
+    }, 30000);
   }
 
   // ─── Lyria API call ───────────────────────────────────────────────────────
@@ -204,7 +170,6 @@ class MusicManager {
     const prompt = MusicManager.getPrompt(mood);
     if (!prompt) return null;
 
-    this.generating = true;
     console.log(`[Music] Generating Lyria clip for: "${mood}"...`);
 
     try {
@@ -226,7 +191,6 @@ class MusicManager {
       }
 
       const data = await res.json();
-      console.log('[Music] Lyria raw response:', JSON.stringify(data).slice(0, 500));
       const audioPart = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
       if (!audioPart) {
         throw new Error('No audio data in Lyria response');
@@ -240,8 +204,13 @@ class MusicManager {
     } catch (e) {
       console.error('[Music] Lyria generation failed:', e);
       return null;
-    } finally {
-      this.generating = false;
+    }
+  }
+
+  _clearRegenTimer() {
+    if (this.regenTimer) {
+      clearTimeout(this.regenTimer);
+      this.regenTimer = null;
     }
   }
 
@@ -250,35 +219,12 @@ class MusicManager {
   setEnabled(enabled) {
     this.enabled = enabled;
     if (!enabled) {
-      this._clearRegenTimer();
-      this.isPlaying = false;
-      this.generating = false; // Reset so re-enable isn't blocked by stale flag
-      this.pendingMood = null;
-      this.currentMood = null;
-      this.onStopAudio();
+      this._stopSession();
     }
   }
 
-  // Called when re-enabling — bypasses onCycle's guards and starts fresh
-  async startForUrl(url) {
-    if (!this.enabled) return;
-    const mood = MusicManager.detectMood(url);
-    if (mood === 'mute') return;
-    // Force reset state so nothing blocks us
-    this.isPlaying = false;
-    this.generating = false;
-    this.pendingMood = null;
-    this.currentMood = null;
-    await this._startMood(mood);
-  }
-
   stop() {
-    this._clearRegenTimer();
     this.enabled = false;
-    this.isPlaying = false;
-    this.generating = false;
-    this.pendingMood = null;
-    this.currentMood = null;
-    this.onStopAudio();
+    this._stopSession();
   }
 }
