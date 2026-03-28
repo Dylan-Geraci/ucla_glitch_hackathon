@@ -3,8 +3,8 @@
 
 const { GoogleGenAI, Modality } = require('@google/genai');
 
-const SYSTEM_PROMPT = `You are an intelligent, witty inner voice and browsing companion. 
-You observe what the user is looking at in their browser and offer insightful, concise commentary.
+const SYSTEM_PROMPT = `You are an intelligent, witty browsing companion built into the user's browser.
+You observe what the user is looking at via periodic screenshots and can hear them via microphone.
 
 Your personality:
 - Curious and observant — you notice details others miss
@@ -12,23 +12,74 @@ Your personality:
 - Occasionally dry humor, always substantive
 - You speak in short, natural sentences — never walls of text
 
-When the user asks a question about the page:
-1. Answer directly and concisely
-2. If you reference something on the page, say "I'll highlight that for you" and include [HIGHLIGHT: css_selector_or_text] in your response
-3. If you want to annotate something, include [ANNOTATE: x,y: your text] in your response  
-4. If you want to scroll to content, include [SCROLL: text to find]
+You have tools to interact with the browser:
+- highlight_answer: visually highlight an element on the page and explain it
+- scroll_to_text: scroll to find text on the page
+- navigate_to_url: navigate to a URL
+- go_back: go back in browser history
+- reload_page: reload the current page
+- get_page_text: read all visible text on the page
 
-When proactively commenting (not asked):
-- Keep it to 1-2 sentences max
-- Only comment if something is genuinely interesting or worth noting
-- Don't repeat yourself about the same page
+When the user asks about something on the page, use highlight_answer or scroll_to_text.
+When proactively commenting (not asked), keep it to 1-2 sentences. Only comment if something is genuinely interesting.`;
 
-Always be aware you're seeing a screenshot of what the user is viewing.`;
+const TOOL_DECLARATIONS = [
+  {
+    name: 'highlight_answer',
+    description: 'Highlight a DOM element on the page that contains the answer to the user\'s question. Use this whenever you identify where the answer is on the page.',
+    parameters: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'CSS selector of the element to highlight.' },
+        explanation: { type: 'string', description: 'Brief spoken explanation to give while the element is highlighted.' },
+      },
+      required: ['selector', 'explanation'],
+    },
+  },
+  {
+    name: 'scroll_to_text',
+    description: 'Find text on the page and scroll it into view.',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'The text string to find and scroll to.' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'navigate_to_url',
+    description: 'Navigate the browser to a URL.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Full URL to navigate to (include https://).' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'go_back',
+    description: 'Navigate back in the browser history.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'reload_page',
+    description: 'Reload the current page.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_page_text',
+    description: 'Get all visible text from the current page for analysis. Use this before answering questions about page content.',
+    parameters: { type: 'object', properties: {} },
+  },
+];
 
 class GeminiLiveClient {
-  constructor(apiKey, mainWindow) {
+  constructor(apiKey, mainWindow, browserView) {
     this.apiKey = apiKey;
     this.mainWindow = mainWindow;
+    this.browserView = browserView;
     this.ai = new GoogleGenAI({ apiKey });
     this.session = null;
     this.connected = false;
@@ -36,17 +87,17 @@ class GeminiLiveClient {
 
   async connect() {
     try {
-      // Use Gemini 2.0 Flash for Live API
       this.session = await this.ai.live.connect({
         model: 'gemini-2.0-flash-live-001',
         config: {
-          responseModalities: [Modality.AUDIO, Modality.TEXT],
+          responseModalities: [Modality.AUDIO],
           systemInstruction: SYSTEM_PROMPT,
           speechConfig: {
             voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: 'Charon' }, // Deep, calm voice
+              prebuiltVoiceConfig: { voiceName: 'Charon' },
             },
           },
+          tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
         },
         callbacks: {
           onopen: () => {
@@ -74,23 +125,9 @@ class GeminiLiveClient {
   }
 
   _handleMessage(message) {
-    // Extract text
-    const textParts = message.serverContent?.modelTurn?.parts?.filter(p => p.text) || [];
+    // Audio response — forward to renderer for playback
     const audioParts = message.serverContent?.modelTurn?.parts?.filter(p => p.inlineData) || [];
-
-    for (const part of textParts) {
-      const text = part.text;
-      if (!text) continue;
-
-      // Parse inline commands from text
-      const commands = this._parseCommands(text);
-      const cleanText = this._stripCommands(text);
-
-      this.mainWindow.webContents.send('agent-text', { text: cleanText, commands });
-    }
-
     for (const part of audioParts) {
-      // Forward raw audio to renderer for playback
       this.mainWindow.webContents.send('agent-audio', {
         data: part.inlineData.data,
         mimeType: part.inlineData.mimeType,
@@ -100,86 +137,123 @@ class GeminiLiveClient {
     if (message.serverContent?.turnComplete) {
       this.mainWindow.webContents.send('agent-turn-complete');
     }
+
+    // Tool call — Gemini wants to perform a browser action
+    if (message.toolCall) {
+      this._handleToolCall(message.toolCall);
+    }
   }
 
-  _parseCommands(text) {
-    const commands = [];
-
-    // [HIGHLIGHT: selector_or_text]
-    const highlightMatch = text.match(/\[HIGHLIGHT:\s*(.+?)\]/g);
-    if (highlightMatch) {
-      highlightMatch.forEach(m => {
-        const val = m.match(/\[HIGHLIGHT:\s*(.+?)\]/)[1].trim();
-        commands.push({ type: 'highlight', value: val });
-      });
+  async _handleToolCall(toolCall) {
+    for (const call of toolCall.functionCalls) {
+      console.log(`[Tool] ${call.name}`, call.args);
+      const result = await this._executeTool(call.name, call.args || {});
+      try {
+        await this.session.sendToolResponse({
+          functionResponses: [{
+            id: call.id,
+            name: call.name,
+            response: { result },
+          }],
+        });
+      } catch (e) {
+        console.error('[Tool] sendToolResponse failed:', e);
+      }
     }
-
-    // [ANNOTATE: x,y: text]
-    const annotateMatch = text.match(/\[ANNOTATE:\s*(\d+),(\d+):\s*(.+?)\]/g);
-    if (annotateMatch) {
-      annotateMatch.forEach(m => {
-        const parts = m.match(/\[ANNOTATE:\s*(\d+),(\d+):\s*(.+?)\]/);
-        commands.push({ type: 'annotate', x: parseInt(parts[1]), y: parseInt(parts[2]), text: parts[3] });
-      });
-    }
-
-    // [SCROLL: text]
-    const scrollMatch = text.match(/\[SCROLL:\s*(.+?)\]/g);
-    if (scrollMatch) {
-      scrollMatch.forEach(m => {
-        const val = m.match(/\[SCROLL:\s*(.+?)\]/)[1].trim();
-        commands.push({ type: 'scroll', value: val });
-      });
-    }
-
-    return commands;
   }
 
-  _stripCommands(text) {
-    return text
-      .replace(/\[HIGHLIGHT:\s*.+?\]/g, '')
-      .replace(/\[ANNOTATE:\s*\d+,\d+:\s*.+?\]/g, '')
-      .replace(/\[SCROLL:\s*.+?\]/g, '')
-      .trim();
+  async _executeTool(name, args) {
+    const bv = this.browserView;
+    if (!bv) return 'No browser view available';
+
+    try {
+      switch (name) {
+        case 'highlight_answer': {
+          await bv.webContents.executeJavaScript(`
+            (function() {
+              const el = document.querySelector(${JSON.stringify(args.selector)});
+              if (!el) return false;
+              const prev = el.style.cssText;
+              el.style.cssText += ';outline:3px solid #00E5FF !important;box-shadow:0 0 16px rgba(0,229,255,0.5) !important;background-color:rgba(0,229,255,0.12) !important;transition:all 0.3s ease !important;';
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              setTimeout(() => { el.style.cssText = prev; }, 4000);
+              return true;
+            })()
+          `);
+          return args.explanation || 'Highlighted.';
+        }
+
+        case 'scroll_to_text': {
+          const found = await bv.webContents.executeJavaScript(`
+            (function() {
+              const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+              let node;
+              while ((node = walker.nextNode())) {
+                if (node.textContent.toLowerCase().includes(${JSON.stringify(args.text.toLowerCase())})) {
+                  const el = node.parentElement;
+                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  const prev = el.style.background;
+                  el.style.background = 'rgba(0,229,255,0.15)';
+                  setTimeout(() => { el.style.background = prev; }, 3000);
+                  return true;
+                }
+              }
+              return false;
+            })()
+          `);
+          return found ? `Scrolled to "${args.text}"` : `Text not found: "${args.text}"`;
+        }
+
+        case 'navigate_to_url': {
+          let url = args.url;
+          if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
+          await bv.webContents.loadURL(url);
+          return `Navigated to ${url}`;
+        }
+
+        case 'go_back':
+          bv.webContents.goBack();
+          return 'Went back';
+
+        case 'reload_page':
+          bv.webContents.reload();
+          return 'Page reloaded';
+
+        case 'get_page_text': {
+          const text = await bv.webContents.executeJavaScript(
+            `document.body.innerText.slice(0, 6000)`
+          );
+          return text;
+        }
+
+        default:
+          return `Unknown tool: ${name}`;
+      }
+    } catch (e) {
+      console.error(`[Tool] ${name} failed:`, e);
+      return `Error: ${e.message}`;
+    }
   }
 
   async sendScreenshot(base64Image) {
     if (!this.session || !this.connected) return;
     try {
-      await this.session.sendMessage({
-        turns: [{
-          role: 'user',
-          parts: [
-            {
-              inlineData: {
-                mimeType: 'image/png',
-                data: base64Image.replace(/^data:image\/\w+;base64,/, ''),
-              },
-            },
-            { text: 'Here is what I am currently viewing. Offer a brief observation if anything is interesting, otherwise stay quiet. Keep it to 1-2 sentences max.' },
-          ],
-        }],
+      await this.session.sendRealtimeInput({
+        video: {
+          data: base64Image.replace(/^data:image\/\w+;base64,/, ''),
+          mimeType: 'image/png',
+        },
       });
     } catch (e) {
       console.error('[Gemini] Screenshot send failed:', e);
     }
   }
 
-  async sendAudio(audioBase64, mimeType = 'audio/webm') {
+  async sendAudio(audioBase64, mimeType = 'audio/pcm;rate=16000') {
     if (!this.session || !this.connected) return { error: 'Not connected' };
     try {
-      // First send current screenshot for context
-      // Then send audio
-      await this.session.sendMessage({
-        turns: [{
-          role: 'user',
-          parts: [{
-            inlineData: {
-              mimeType,
-              data: audioBase64,
-            },
-          }],
-        }],
+      await this.session.sendRealtimeInput({
+        audio: { data: audioBase64, mimeType },
       });
       return { success: true };
     } catch (e) {
@@ -197,28 +271,6 @@ class GeminiLiveClient {
       return { success: true };
     } catch (e) {
       return { error: e.message };
-    }
-  }
-
-  async sendScreenshotWithQuestion(base64Image, question) {
-    if (!this.session || !this.connected) return;
-    try {
-      await this.session.sendMessage({
-        turns: [{
-          role: 'user',
-          parts: [
-            {
-              inlineData: {
-                mimeType: 'image/png',
-                data: base64Image.replace(/^data:image\/\w+;base64,/, ''),
-              },
-            },
-            { text: question },
-          ],
-        }],
-      });
-    } catch (e) {
-      console.error('[Gemini] Q+Screenshot send failed:', e);
     }
   }
 

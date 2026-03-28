@@ -183,7 +183,7 @@ ipcMain.handle('get-page-text', async () => {
 // ─── IPC: Agent Control ───────────────────────────────────────────────────────
 ipcMain.handle('init-agent', async (_, { apiKey }) => {
   try {
-    geminiClient = new GeminiLiveClient(apiKey, mainWindow);
+    geminiClient = new GeminiLiveClient(apiKey, mainWindow, browserView);
     screenshotManager = new ScreenshotManager(mainWindow, browserView, geminiClient);
     await geminiClient.connect();
     return { success: true };
