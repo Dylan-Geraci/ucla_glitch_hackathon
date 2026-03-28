@@ -21,16 +21,15 @@ function createMainWindow() {
     backgroundColor: '#0a0a0f',
     titleBarStyle: 'hiddenInset',
     webPreferences: {
-      preload: path.join(__dirname, '../preload/preload.js'),
+      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
 
-  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+  mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
-  // Create the BrowserView that acts as the embedded browser
-  createBrowserView();
+  // BrowserView is created lazily in init-agent so the setup overlay is visible on launch
 
   mainWindow.on('resize', () => repositionBrowserView());
   mainWindow.on('closed', () => {
@@ -183,6 +182,8 @@ ipcMain.handle('get-page-text', async () => {
 // ─── IPC: Agent Control ───────────────────────────────────────────────────────
 ipcMain.handle('init-agent', async (_, { apiKey }) => {
   try {
+    // Create the browser view now that setup is complete
+    if (!browserView) createBrowserView();
     geminiClient = new GeminiLiveClient(apiKey, mainWindow, browserView);
     screenshotManager = new ScreenshotManager(mainWindow, browserView, geminiClient);
     await geminiClient.connect();
