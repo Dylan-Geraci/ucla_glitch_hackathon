@@ -160,6 +160,11 @@ function getStructuredPageText() {
       const text = (el.innerText || el.value || el.ariaLabel || el.title || "").trim().replace(/\s+/g, ' ');
       if (!text || text.length < 2) return;
 
+      // Filter out meta-information and noisy elements
+      const lower = text.toLowerCase();
+      const excluded = ['about this result', 'feedback', 'privacy', 'terms', 'learn more', 'about the source', 'ai overview'];
+      if (excluded.some(phrase => lower.includes(phrase))) return;
+
       const tag = (el.tagName === 'A') ? 'L' : 'B';
       const idx = (tag === 'L') ? linkIdx++ : btnIdx++;
       const label = `${tag}${idx}`;

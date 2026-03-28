@@ -27,6 +27,8 @@ CRITICAL RULES — follow these in priority order:
    - You receive structured page context. Links are [L1: Text], [L2: Text], etc. Buttons are [B1: Text].
    - To open a link, use click_element with the label (e.g., "L1") or the text.
    - If asked for the "first link", use "L1".
+   - CRITICAL: Focus on primary search results and titles. Avoid clicking small informational icons, "About this result", or "Feedback" panels.
+   - MULTI-STEP: If asked to "open" a topic and you are not on the right page, first navigate to a search (e.g., google.com/search?q=Topic). Once the results page finishes loading, you will AUTOMATICALLY receive updated [L1, L2...] context. Then, pick the best result and click it.
 3. VERBAL CONFIRMATION:
    - Always give a short verbal confirmation after using a tool (e.g., "Opening that UCLA link for you" or "Searching for monkeys").
 4. KEY CONTEXT:
@@ -411,7 +413,7 @@ function sendSilencePadding() {
 
 // ─── Send page context before voice input ────────────────────────────────────
 
-async function sendPageContextToLive() {
+async function sendPageContextToLive(turnComplete = false) {
   if (!ws || !wsReady) return;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -425,18 +427,18 @@ async function sendPageContextToLive() {
     } catch (e) {}
 
     const contextMsg = pageText
-      ? `[Current page context for voice interaction]\n[URL: ${currentUrl}]\n[PAGE TEXT]\n${pageText}\n[END]`
-      : `[Current page context for voice interaction]\n[URL: ${currentUrl}]\n[No page text available]`;
+      ? `[Updated page context]\n[URL: ${currentUrl}]\n[PAGE TEXT]\n${pageText}\n[END]`
+      : `[Updated page context]\n[URL: ${currentUrl}]\n[No page text available]`;
 
     ws.send(JSON.stringify({
       clientContent: {
         turns: [{ role: 'user', parts: [{ text: contextMsg }] }],
-        turnComplete: false,
+        turnComplete: turnComplete,
       }
     }));
-    console.log('[WS] Sent page context for voice interaction');
+    console.log('[WS] Pushed updated page context to Live session');
   } catch (e) {
-    console.error('[WS] Failed to send page context:', e);
+    console.error('[WS] Failed to push page context:', e);
   }
 }
 
@@ -680,6 +682,9 @@ chrome.action.onClicked.addListener((tab) => {
 let navDebounceTimer = null;
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete') {
+    if (wsReady) {
+      sendPageContextToLive(false);
+    }
     if (agentActive) {
       clearTimeout(navDebounceTimer);
       navDebounceTimer = setTimeout(() => captureScreenshot(), 2000);
