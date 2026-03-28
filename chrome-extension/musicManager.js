@@ -88,29 +88,12 @@ class MusicManager {
       return;
     }
 
-    if (!this.isPlaying) {
+    if (!this.isPlaying && !this.generating) {
       await this._startMood(newMood);
     } else {
-      // Queue — current clip plays to end, then switch
+      // Something playing or generating — queue the new mood
       this.pendingMood = newMood;
       console.log(`[Music] Queued "${newMood}" — waiting for current clip to finish`);
-    }
-  }
-
-  // ─── Called by side panel when clip finishes playing ───────────────────────
-
-  async onClipEnded() {
-    this.isPlaying = false;
-    if (!this.enabled) return;
-
-    if (this.pendingMood && this.pendingMood !== this.currentMood) {
-      const next = this.pendingMood;
-      this.pendingMood = null;
-      await this._startMood(next);
-    } else {
-      // Same mood — loop (replay cached clip)
-      this.pendingMood = null;
-      await this._startMood(this.currentMood);
     }
   }
 
@@ -133,11 +116,20 @@ class MusicManager {
         return;
       }
       this.clipCache.set(mood, cached);
+
+      // Check if mood changed while we were generating
+      if (this.pendingMood && this.pendingMood !== mood) {
+        const next = this.pendingMood;
+        this.pendingMood = null;
+        await this._startMood(next);
+        return;
+      }
     }
 
     this.isPlaying = true;
+    this.pendingMood = null;
     this.onPlayAudio(mood, cached.data, cached.mimeType);
-    console.log(`[Music] Playing: ${mood}`);
+    console.log(`[Music] Playing: ${mood} (looping in side panel)`);
   }
 
   // ─── Lyria API call ───────────────────────────────────────────────────────
@@ -168,6 +160,7 @@ class MusicManager {
       }
 
       const data = await res.json();
+      console.log('[Music] Lyria raw response:', JSON.stringify(data).slice(0, 500));
       const audioPart = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
       if (!audioPart) {
         throw new Error('No audio data in Lyria response');

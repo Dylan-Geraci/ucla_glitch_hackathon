@@ -17,11 +17,11 @@ Your personality:
 - You speak in short, natural sentences — never walls of text
 
 CRITICAL RULES — follow these exactly:
-1. DEFAULT BEHAVIOR: Respond with plain text. Most of the time you should just TALK — give a spoken answer without using any tools.
-2. When the user asks a QUESTION ("what is", "what's the difference", "explain", "tell me", "why", "how", "compare"), respond ONLY with text. Do NOT call any tool. You already have the page text in the message, so just read it and answer.
-3. ONLY use the highlight_answer tool when the user explicitly says "highlight" or "show me where".
-4. ONLY use navigate_to_url when the user explicitly asks to go to a website.
-5. When proactively commenting (not asked), keep it to 1-2 sentences.
+1. When the user asks a QUESTION about the page ("what is", "what's the difference", "explain", "tell me", "why", "how", "compare"), respond with text. You already have the page text, so read it and answer directly.
+2. When the user says "highlight" or "show me where", use the highlight_answer tool.
+3. When the user says "search for", "look up", "go to", "open", or "navigate to", you MUST use the navigate_to_url tool immediately. Use https://www.google.com/search?q=QUERY for searches. Do NOT tell the user to search themselves — YOU do it.
+4. When proactively commenting (not asked), keep it to 1-2 sentences.
+5. If page text says "No page text available", do NOT make up what's on the page. Just say you can't see the page content.
 
 Your response will be spoken aloud — keep it concise (2-4 sentences for answers).`;
 
@@ -326,55 +326,39 @@ async function sendAudio(audioBase64, mimeType) {
 
     // Include full page text so model can answer questions directly
     let pageText = '';
+    let currentUrl = '';
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab) {
-        const res = await chrome.tabs.sendMessage(tab.id, { type: 'get_page_text' });
-        if (res?.text) {
-          pageText = res.text;
-          parts.push({ text: `${buildMemoryContext()}[FULL PAGE TEXT START]\n${res.text}\n[FULL PAGE TEXT END]\n\nThe user said:` });
-        }
+        currentUrl = tab.url || '';
+        try {
+          const res = await chrome.tabs.sendMessage(tab.id, { type: 'get_page_text' });
+          if (res?.text) pageText = res.text;
+        } catch (e) { /* content script not available on this page */ }
       }
-    } catch (e) { /* ignore if content script not ready */ }
+    } catch (e) { /* no tab */ }
+
+    // Build context — tell model what page we're on even if we can't read text
+    let context = buildMemoryContext();
+    if (pageText) {
+      context += `[Current URL: ${currentUrl}]\n[FULL PAGE TEXT START]\n${pageText}\n[FULL PAGE TEXT END]\n\nThe user said:`;
+    } else {
+      context += `[Current URL: ${currentUrl}]\n[No page text available — content script cannot run on this page. Do NOT guess or hallucinate page content.]\n\nThe user said:`;
+    }
+    parts.push({ text: context });
 
     parts.push({ inlineData: { mimeType, data: audioBase64 } });
 
-    // No tools — just answer directly
+    // Use tools so navigation works
     const response = await generateContent(
       [{ role: 'user', parts }],
-      { tools: false }
+      { tools: true }
     );
 
-    const answer = response.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim();
-
-    if (answer) {
-      addToMemory('user', '[voice message]');
-      addToMemory('model', answer);
-      sendToSidePanel({ type: 'agent-text', text: answer });
-      lastSpokeTime = Date.now();
-
-      // If the user said "highlight" or "show me", also try to highlight
-      // We do this as a separate step after answering
-      if (pageText) {
-        try {
-          const highlightCheck = await generateContent([{
-            role: 'user',
-            parts: [{ text: `The user asked something and you answered: "${answer}"\n\nShould something be highlighted on the page? If so, respond with ONLY a short text snippet (5-15 words) from the page to highlight. If not, respond with exactly: NO` }],
-          }], { tools: false });
-          const snippet = highlightCheck.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim();
-          if (snippet && snippet !== 'NO' && snippet.length < 100) {
-            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (tab) {
-              chrome.tabs.sendMessage(tab.id, { type: 'highlight_answer', text: snippet });
-            }
-          }
-        } catch (e) { /* highlight is optional, don't fail */ }
-      }
-    }
-
-    sendToSidePanel({ type: 'agent-turn-complete' });
-
     await handleResponse(response);
+    addToMemory('user', '[voice message]');
+    const answer = response.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim();
+    if (answer) addToMemory('model', answer);
     lastSpokeTime = Date.now();
     return { success: true };
   } catch (e) {
@@ -397,37 +381,39 @@ async function sendText(text) {
       parts.push({ inlineData: { mimeType: 'image/jpeg', data: lastScreenshotData } });
     }
 
-    // Include full page text
+    // Include full page text + URL
+    let pageText = '';
+    let currentUrl = '';
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab) {
-        const res = await chrome.tabs.sendMessage(tab.id, { type: 'get_page_text' });
-        if (res?.text) {
-          parts.push({ text: `${buildMemoryContext()}[FULL PAGE TEXT START]\n${res.text}\n[FULL PAGE TEXT END]\n\nThe user says: ${text}` });
-        } else {
-          parts.push({ text: `${buildMemoryContext()}The user says: ${text}` });
-        }
-      } else {
-        parts.push({ text: `${buildMemoryContext()}The user says: ${text}` });
+        currentUrl = tab.url || '';
+        try {
+          const res = await chrome.tabs.sendMessage(tab.id, { type: 'get_page_text' });
+          if (res?.text) pageText = res.text;
+        } catch (e) { /* content script not available */ }
       }
-    } catch (e) {
-      parts.push({ text: `${buildMemoryContext()}The user says: ${text}` });
-    }
+    } catch (e) { /* no tab */ }
 
-    // No tools — just answer the question directly
+    let context = buildMemoryContext();
+    if (pageText) {
+      context += `[Current URL: ${currentUrl}]\n[FULL PAGE TEXT START]\n${pageText}\n[FULL PAGE TEXT END]\n\nThe user says: ${text}`;
+    } else {
+      context += `[Current URL: ${currentUrl}]\n[No page text available — do NOT guess page content.]\n\nThe user says: ${text}`;
+    }
+    parts.push({ text: context });
+
+    // Tools enabled for navigation
     const response = await generateContent(
       [{ role: 'user', parts }],
-      { tools: false }
+      { tools: true }
     );
 
+    await handleResponse(response);
+    addToMemory('user', text);
     const answer = response.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim();
-    if (answer) {
-      addToMemory('user', text);
-      addToMemory('model', answer);
-      sendToSidePanel({ type: 'agent-text', text: answer });
-      lastSpokeTime = Date.now();
-    }
-    sendToSidePanel({ type: 'agent-turn-complete' });
+    if (answer) addToMemory('model', answer);
+    lastSpokeTime = Date.now();
     return { success: true };
   } catch (e) {
     console.error('[Gemini] sendText failed:', e);
