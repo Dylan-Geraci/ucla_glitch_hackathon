@@ -1,32 +1,32 @@
 // musicManager.js
-// Adaptive background music via Lyria API — SCAFFOLDING ONLY, not yet integrated
+// Adaptive background music via Lyria API for Chrome Extension
 //
-// How it works:
-//   1. On each screenshot cycle, detectMood() maps the current URL to a mood
-//   2. If mood changed AND the screenshot was different, queue a mood switch
-//   3. Current Lyria clip plays to completion (no abrupt cut)
-//   4. On clip end: if a new mood is pending, generate + play that mood's clip
-//      Otherwise, loop the current mood
-//
-// Integration points (in screenshotManager.js _capture):
-//   const screenshotChanged = (hash !== this.lastScreenshotHash);
-//   await musicManager.onCycle(currentUrl, pageTitle, screenshotChanged);
+// Flow:
+//   1. background.js detects tab URL change → calls onCycle(url)
+//   2. Mood detection maps URL to focus/chill/ambient/mute
+//   3. If mood changed, generate clip via Lyria API (or use cache)
+//   4. Send audio base64 to side panel for playback via onPlayAudio callback
+//   5. Side panel plays it; notifies background when clip ends → loop or switch
+
+const LYRIA_MODEL = 'lyria-3-clip-preview';
+const LYRIA_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 class MusicManager {
-  constructor(mainWindow, ai) {
-    this.mainWindow = mainWindow;
-    this.ai = ai;            // GoogleGenAI instance — for Lyria calls
-    this.currentMood = null;  // 'focus' | 'chill' | 'ambient' | 'mute' | null
-    this.currentAudio = null; // Audio element playing the current clip
+  constructor(apiKey, onPlayAudio, onStopAudio) {
+    this.apiKey = apiKey;
+    this.onPlayAudio = onPlayAudio;   // callback(mood, base64, mimeType)
+    this.onStopAudio = onStopAudio;   // callback()
+    this.enabled = false;
+    this.currentMood = null;
+    this.pendingMood = null;
     this.isPlaying = false;
-    this.pendingMood = null;  // mood to switch to after current clip finishes
-    this.clipCache = new Map(); // mood -> { url: objectURL, buffer: ArrayBuffer }
-    this.volume = 0.25;       // background level (0-1)
+    this.generating = false;
+    this.clipCache = new Map(); // mood -> { data: base64, mimeType: string }
   }
 
   // ─── Mood Detection (URL heuristics) ──────────────────────────────────────
 
-  static detectMood(url, pageTitle = '') {
+  static detectMood(url) {
     let domain;
     try { domain = new URL(url).hostname.toLowerCase(); }
     catch { return 'chill'; }
@@ -60,169 +60,148 @@ class MusicManager {
     ];
     if (chillDomains.some(d => domain.includes(d))) return 'chill';
 
-    // Default
     return 'chill';
   }
 
-  // Lyria prompt for each mood — instrumental only, 30s clips
+  // Lyria prompts — instrumental only
   static moodPrompts = {
     focus:   'lo-fi instrumental hip hop beat, calm study music, soft piano and drums, no vocals, 30 seconds',
     chill:   'soft ambient electronic music, relaxing synth pads, gentle beat, no vocals, 30 seconds',
     ambient: 'peaceful ambient soundscape, slow evolving textures, gentle and warm, no vocals, 30 seconds',
   };
 
-  // ─── Cycle Hook (called from screenshotManager._capture) ─────────────────
+  // ─── Called on tab URL change ─────────────────────────────────────────────
 
-  async onCycle(url, pageTitle, screenshotChanged) {
-    if (!screenshotChanged) return; // page looks the same, keep current music
+  async onCycle(url) {
+    if (!this.enabled) return;
 
-    const newMood = MusicManager.detectMood(url, pageTitle);
-    if (newMood === this.currentMood) return; // same mood, no action
+    const newMood = MusicManager.detectMood(url);
+    if (newMood === this.currentMood) return;
 
-    console.log(`[Music] Mood change detected: ${this.currentMood || 'none'} -> ${newMood}`);
+    console.log(`[Music] Mood change: ${this.currentMood || 'none'} -> ${newMood}`);
 
     if (newMood === 'mute') {
       this.pendingMood = null;
-      this._fadeOutAndStop();
       this.currentMood = 'mute';
+      this.isPlaying = false;
+      this.onStopAudio();
       return;
     }
 
-    if (!this.isPlaying || !this.currentAudio) {
-      // Nothing playing — start immediately
-      await this._playMood(newMood);
+    if (!this.isPlaying) {
+      await this._startMood(newMood);
     } else {
-      // Something playing — queue the new mood, current clip plays to the end
+      // Queue — current clip plays to end, then switch
       this.pendingMood = newMood;
       console.log(`[Music] Queued "${newMood}" — waiting for current clip to finish`);
     }
   }
 
-  // ─── Playback ─────────────────────────────────────────────────────────────
+  // ─── Called by side panel when clip finishes playing ───────────────────────
 
-  async _playMood(mood) {
+  async onClipEnded() {
+    this.isPlaying = false;
+    if (!this.enabled) return;
+
+    if (this.pendingMood && this.pendingMood !== this.currentMood) {
+      const next = this.pendingMood;
+      this.pendingMood = null;
+      await this._startMood(next);
+    } else {
+      // Same mood — loop (replay cached clip)
+      this.pendingMood = null;
+      await this._startMood(this.currentMood);
+    }
+  }
+
+  // ─── Generate + send clip to side panel ───────────────────────────────────
+
+  async _startMood(mood) {
     this.currentMood = mood;
 
     // Check cache first
-    let clipUrl = this.clipCache.get(mood);
+    let cached = this.clipCache.get(mood);
 
-    if (!clipUrl) {
-      // TODO: Generate clip via Lyria API
-      // clipUrl = await this._generateClip(mood);
-      // this.clipCache.set(mood, clipUrl);
-      console.log(`[Music] Would generate Lyria clip for mood: "${mood}"`);
-      console.log(`[Music] Prompt: "${MusicManager.moodPrompts[mood]}"`);
-      return; // Can't play yet — no Lyria integration
-    }
-
-    this.currentAudio = new Audio(clipUrl);
-    this.currentAudio.volume = this.volume;
-    this.currentAudio.onended = () => this._onClipEnded();
-    this.currentAudio.onerror = (e) => {
-      console.error('[Music] Playback error:', e);
-      this.isPlaying = false;
-    };
-
-    try {
-      await this.currentAudio.play();
-      this.isPlaying = true;
-      console.log(`[Music] Playing: ${mood}`);
-    } catch (e) {
-      console.error('[Music] Play failed:', e);
-    }
-  }
-
-  _onClipEnded() {
-    this.isPlaying = false;
-
-    if (this.pendingMood && this.pendingMood !== this.currentMood) {
-      // Mood changed while clip was playing — switch now
-      const next = this.pendingMood;
-      this.pendingMood = null;
-      this._playMood(next);
-    } else {
-      // Same mood — loop
-      this.pendingMood = null;
-      this._playMood(this.currentMood);
-    }
-  }
-
-  _fadeOutAndStop() {
-    if (!this.currentAudio) {
-      this.isPlaying = false;
-      return;
-    }
-
-    // Gradual fade over 2 seconds
-    const audio = this.currentAudio;
-    const steps = 20;
-    const stepTime = 2000 / steps;
-    const volumeStep = audio.volume / steps;
-    let step = 0;
-
-    const fadeInterval = setInterval(() => {
-      step++;
-      audio.volume = Math.max(0, audio.volume - volumeStep);
-      if (step >= steps) {
-        clearInterval(fadeInterval);
-        audio.pause();
-        audio.currentTime = 0;
-        this.isPlaying = false;
-        this.currentAudio = null;
+    if (!cached) {
+      if (this.generating) {
+        console.log('[Music] Already generating, skipping');
+        return;
       }
-    }, stepTime);
+      cached = await this._generateClip(mood);
+      if (!cached) {
+        console.error('[Music] Failed to generate clip for:', mood);
+        return;
+      }
+      this.clipCache.set(mood, cached);
+    }
+
+    this.isPlaying = true;
+    this.onPlayAudio(mood, cached.data, cached.mimeType);
+    console.log(`[Music] Playing: ${mood}`);
   }
 
-  // ─── Lyria Generation (TODO) ──────────────────────────────────────────────
+  // ─── Lyria API call ───────────────────────────────────────────────────────
 
   async _generateClip(mood) {
     const prompt = MusicManager.moodPrompts[mood];
     if (!prompt) return null;
 
-    // TODO: Uncomment when ready to integrate Lyria
-    //
-    // try {
-    //   const result = await this.ai.models.generateContent({
-    //     model: 'lyria-3-clip-preview',   // $0.04 per 30s clip
-    //     contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    //   });
-    //
-    //   // Extract audio data from response
-    //   const audioPart = result.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-    //   if (!audioPart) return null;
-    //
-    //   // Convert to object URL for playback
-    //   const binary = atob(audioPart.inlineData.data);
-    //   const bytes = new Uint8Array(binary.length);
-    //   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    //   const blob = new Blob([bytes], { type: audioPart.inlineData.mimeType });
-    //   const url = URL.createObjectURL(blob);
-    //
-    //   this.clipCache.set(mood, url);
-    //   console.log(`[Music] Generated and cached clip for: ${mood}`);
-    //   return url;
-    // } catch (e) {
-    //   console.error('[Music] Lyria generation failed:', e);
-    //   return null;
-    // }
+    this.generating = true;
+    console.log(`[Music] Generating Lyria clip for: "${mood}"...`);
+
+    try {
+      const url = `${LYRIA_API_BASE}/${LYRIA_MODEL}:generateContent?key=${this.apiKey}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+          },
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Lyria API ${res.status}: ${err}`);
+      }
+
+      const data = await res.json();
+      const audioPart = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+      if (!audioPart) {
+        throw new Error('No audio data in Lyria response');
+      }
+
+      console.log(`[Music] Generated clip for "${mood}" (${audioPart.inlineData.mimeType})`);
+      return {
+        data: audioPart.inlineData.data,
+        mimeType: audioPart.inlineData.mimeType,
+      };
+    } catch (e) {
+      console.error('[Music] Lyria generation failed:', e);
+      return null;
+    } finally {
+      this.generating = false;
+    }
   }
 
-  // ─── Cleanup ──────────────────────────────────────────────────────────────
+  // ─── Controls ─────────────────────────────────────────────────────────────
+
+  setEnabled(enabled) {
+    this.enabled = enabled;
+    if (!enabled) {
+      this.isPlaying = false;
+      this.pendingMood = null;
+      this.onStopAudio();
+    }
+  }
 
   stop() {
-    this.pendingMood = null;
-    if (this.currentAudio) {
-      this.currentAudio.pause();
-      this.currentAudio = null;
-    }
+    this.enabled = false;
     this.isPlaying = false;
+    this.pendingMood = null;
     this.currentMood = null;
-  }
-
-  setVolume(vol) {
-    this.volume = Math.max(0, Math.min(1, vol));
-    if (this.currentAudio) this.currentAudio.volume = this.volume;
+    this.onStopAudio();
   }
 }
-
-module.exports = { MusicManager };

@@ -16,9 +16,12 @@ const screenshotFlash = document.getElementById('screenshot-flash');
 const keyBtn         = document.getElementById('key-btn');
 const textInput      = document.getElementById('text-input');
 const sendBtn        = document.getElementById('send-btn');
+const musicToggle    = document.getElementById('music-toggle');
+const musicStatus    = document.getElementById('music-status');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let isRecording = false;
+let musicAudio = null; // Audio element for background music
 
 // ─── Persistent port to background ──────────────────────────────────────────
 const port = chrome.runtime.connect({ name: 'sidepanel' });
@@ -78,6 +81,13 @@ agentToggle.addEventListener('change', () => {
 // ─── Frequency Slider ────────────────────────────────────────────────────────
 freqSlider.addEventListener('input', () => {
   chrome.runtime.sendMessage({ action: 'set-frequency', value: parseFloat(freqSlider.value) });
+});
+
+// ─── Music Toggle ────────────────────────────────────────────────────────────
+musicToggle.addEventListener('change', () => {
+  const enabled = musicToggle.checked;
+  chrome.runtime.sendMessage({ action: 'toggle-music', enabled });
+  musicStatus.textContent = enabled ? 'Loading...' : 'Off';
 });
 
 // ─── Microphone / Voice Input (toggle mode) ─────────────────────────────────
@@ -180,6 +190,38 @@ function handleBackgroundMessage(msg) {
       void screenshotFlash.offsetWidth;
       screenshotFlash.classList.add('flash');
       setTimeout(() => screenshotFlash.classList.remove('flash'), 500);
+      break;
+
+    case 'music-play': {
+      // Stop any existing music
+      if (musicAudio) {
+        musicAudio.pause();
+        musicAudio = null;
+      }
+      // Create audio from base64
+      const dataUrl = `data:${msg.mimeType};base64,${msg.audioData}`;
+      musicAudio = new Audio(dataUrl);
+      musicAudio.volume = 0.25;
+      musicAudio.loop = true; // Loop the clip continuously
+      musicAudio.onerror = (e) => {
+        console.error('[Music] Playback error:', e);
+        musicStatus.textContent = 'Error';
+      };
+      musicAudio.play().then(() => {
+        musicStatus.textContent = msg.mood;
+      }).catch(e => {
+        console.error('[Music] Play failed:', e);
+        musicStatus.textContent = 'Error';
+      });
+      break;
+    }
+
+    case 'music-stop':
+      if (musicAudio) {
+        musicAudio.pause();
+        musicAudio = null;
+      }
+      musicStatus.textContent = musicToggle.checked ? 'Paused' : 'Off';
       break;
   }
 }

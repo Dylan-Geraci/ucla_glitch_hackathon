@@ -1,5 +1,7 @@
 // background.js — Service worker: Gemini API client + screenshot manager
 
+importScripts('musicManager.js');
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 const MODEL = 'gemini-3.1-flash-lite-preview';
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -68,6 +70,7 @@ let intervalMs = 60000;
 let lastScreenshotHash = null;
 let lastSpokeTime = 0;
 let lastScreenshotData = null; // raw base64 (no prefix)
+let musicManager = null;
 
 // ─── Conversation Memory ────────────────────────────────────────────────────
 // Stores recent conversation turns so the model has context
@@ -470,6 +473,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       ).then(() => {
         connected = true;
         chrome.storage.local.set({ apiKey });
+        // Initialize music manager with callbacks to side panel
+        musicManager = new MusicManager(
+          apiKey,
+          (mood, audioData, mimeType) => {
+            sendToSidePanel({ type: 'music-play', mood, audioData, mimeType });
+          },
+          () => {
+            sendToSidePanel({ type: 'music-stop' });
+          }
+        );
         sendToSidePanel({ type: 'agent-status', connected: true });
         sendResponse({ success: true });
       }).catch((e) => {
@@ -542,8 +555,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       apiKey = null;
       connected = false;
       stopScreenshots();
+      if (musicManager) musicManager.stop();
       chrome.storage.local.remove('apiKey');
       sendResponse({ ok: true });
+      break;
+    }
+
+    case 'toggle-music': {
+      if (musicManager) {
+        musicManager.setEnabled(msg.enabled);
+        if (msg.enabled) {
+          // Trigger an initial mood check for the current tab
+          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs[0]?.url) musicManager.onCycle(tabs[0].url);
+          });
+        }
+      }
+      sendResponse({ ok: true });
+      break;
+    }
+
+    case 'music-ended': {
+      if (musicManager) musicManager.onClipEnded();
       break;
     }
   }
@@ -558,10 +591,16 @@ chrome.action.onClicked.addListener((tab) => {
 // ─── Tab navigation listener (trigger screenshot on nav) ────────────────────
 
 let navDebounceTimer = null;
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'complete' && agentActive) {
-    clearTimeout(navDebounceTimer);
-    navDebounceTimer = setTimeout(() => captureScreenshot(), 2000);
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete') {
+    if (agentActive) {
+      clearTimeout(navDebounceTimer);
+      navDebounceTimer = setTimeout(() => captureScreenshot(), 2000);
+    }
+    // Trigger music mood check on navigation
+    if (musicManager && musicManager.enabled && tab.url) {
+      musicManager.onCycle(tab.url);
+    }
   }
 });
 
