@@ -22,6 +22,7 @@ const musicStatus    = document.getElementById('music-status');
 // ─── State ───────────────────────────────────────────────────────────────────
 let isRecording = false;
 let musicAudio = null; // Audio element for background music
+let currentMusicDataUrl = null; // Stored so we can seamlessly self-loop
 
 // ─── Persistent port to background ──────────────────────────────────────────
 const port = chrome.runtime.connect({ name: 'sidepanel' });
@@ -199,24 +200,17 @@ function handleBackgroundMessage(msg) {
       break;
 
     case 'music-play': {
-      // Crossfade: fade out old clip over 5s while fading in new clip
       const dataUrl = `data:${msg.mimeType};base64,${msg.audioData}`;
-      const newAudio = new Audio(dataUrl);
-      newAudio.volume = 0;
-      newAudio.loop = true;
-      newAudio.onerror = (e) => {
-        console.error('[Music] Playback error:', e);
-        musicStatus.textContent = 'Error';
-      };
 
-      // Fade out old audio over 5 seconds
+      // Fade out whatever is currently playing
       if (musicAudio) {
-        fadeAudio(musicAudio, musicAudio.volume, 0, 5000, () => {
-          musicAudio.pause();
-        });
+        const old = musicAudio;
+        fadeAudio(old, old.volume, 0, 5000, () => { old.pause(); });
+        musicAudio = null;
       }
 
-      // Start new audio and fade in over 5 seconds
+      // Create and start the new clip
+      const newAudio = createMusicAudio(dataUrl);
       newAudio.play().then(() => {
         musicStatus.textContent = msg.mood;
         fadeAudio(newAudio, 0, 0.25, 5000);
@@ -226,6 +220,7 @@ function handleBackgroundMessage(msg) {
       });
 
       musicAudio = newAudio;
+      currentMusicDataUrl = dataUrl;
       break;
     }
 
@@ -237,12 +232,45 @@ function handleBackgroundMessage(msg) {
 }
 
 // ─── Music Helpers ──────────────────────────────────────────────────────────
+
+// Create an Audio element with seamless self-loop crossfade
+function createMusicAudio(dataUrl) {
+  const audio = new Audio(dataUrl);
+  audio.volume = 0;
+  audio.loop = false; // We loop manually to avoid the gap
+
+  audio.onerror = (e) => {
+    console.error('[Music] Playback error:', e);
+    musicStatus.textContent = 'Error';
+  };
+
+  // When nearing the end, crossfade into a clone of itself (seamless loop)
+  let looping = false;
+  audio.addEventListener('timeupdate', () => {
+    if (looping) return;
+    if (!audio.duration || audio.duration - audio.currentTime > 3) return;
+    // Only self-loop if this is still the active audio
+    if (musicAudio !== audio) return;
+    looping = true;
+
+    const clone = createMusicAudio(dataUrl);
+    clone.play().then(() => {
+      fadeAudio(clone, 0, 0.25, 3000);
+      fadeAudio(audio, audio.volume, 0, 3000, () => { audio.pause(); });
+    }).catch(() => {});
+    musicAudio = clone;
+    currentMusicDataUrl = dataUrl;
+  });
+
+  return audio;
+}
+
 function fadeAudio(audio, from, to, duration, onDone) {
   const steps = 50;
   const stepTime = duration / steps;
   const stepDelta = (to - from) / steps;
   let step = 0;
-  audio.volume = from;
+  audio.volume = Math.max(0, Math.min(1, from));
   const interval = setInterval(() => {
     step++;
     audio.volume = Math.max(0, Math.min(1, from + stepDelta * step));
@@ -259,6 +287,7 @@ function stopMusicAudio() {
     musicAudio.pause();
     musicAudio = null;
   }
+  currentMusicDataUrl = null;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -63,12 +63,37 @@ class MusicManager {
     return 'chill';
   }
 
-  // Lyria prompts — instrumental only
-  static moodPrompts = {
-    focus:   'lo-fi instrumental hip hop beat, calm study music, soft piano and drums, no vocals, 30 seconds',
-    chill:   'soft ambient electronic music, relaxing synth pads, gentle beat, no vocals, 30 seconds',
-    ambient: 'peaceful ambient soundscape, slow evolving textures, gentle and warm, no vocals, 30 seconds',
+  // Lyria prompt templates — instrumental only, with variations for variety
+  static moodPromptBases = {
+    focus: [
+      'lo-fi instrumental hip hop beat, calm study music, soft piano and drums',
+      'lo-fi jazz hop instrumental, mellow keys and vinyl crackle, steady boom bap drums',
+      'chill instrumental beat, acoustic guitar loops and soft snare, warm lo-fi feel',
+      'mellow instrumental hip hop, Rhodes piano chords and tape hiss, relaxed groove',
+      'downtempo lo-fi beat, gentle flute melody over soft drums, cozy study vibe',
+    ],
+    chill: [
+      'soft ambient electronic music, relaxing synth pads, gentle beat',
+      'dreamy chillwave instrumental, lush reverb synths, slow tempo groove',
+      'smooth downtempo electronica, warm bass and airy pads, easy listening',
+      'chillhop instrumental, mellow vibes with soft percussion and floating melodies',
+      'laid-back electronic instrumental, gentle arpeggios and deep sub bass, calm mood',
+    ],
+    ambient: [
+      'peaceful ambient soundscape, slow evolving textures, gentle and warm',
+      'serene ambient music, soft drones and distant chimes, meditative feel',
+      'calm ambient instrumental, ocean-like pads and subtle harmonics, tranquil',
+      'ethereal ambient soundscape, shimmering tones and deep reverb, weightless',
+      'minimalist ambient music, sparse piano notes over warm pad layers, contemplative',
+    ],
   };
+
+  static getPrompt(mood) {
+    const bases = MusicManager.moodPromptBases[mood];
+    if (!bases) return null;
+    const base = bases[Math.floor(Math.random() * bases.length)];
+    return `${base}, no vocals, 30 seconds`;
+  }
 
   // ─── Called on tab URL change ─────────────────────────────────────────────
 
@@ -176,7 +201,7 @@ class MusicManager {
   // ─── Lyria API call ───────────────────────────────────────────────────────
 
   async _generateClip(mood) {
-    const prompt = MusicManager.moodPrompts[mood];
+    const prompt = MusicManager.getPrompt(mood);
     if (!prompt) return null;
 
     this.generating = true;
@@ -227,15 +252,31 @@ class MusicManager {
     if (!enabled) {
       this._clearRegenTimer();
       this.isPlaying = false;
+      this.generating = false; // Reset so re-enable isn't blocked by stale flag
       this.pendingMood = null;
+      this.currentMood = null;
       this.onStopAudio();
     }
+  }
+
+  // Called when re-enabling — bypasses onCycle's guards and starts fresh
+  async startForUrl(url) {
+    if (!this.enabled) return;
+    const mood = MusicManager.detectMood(url);
+    if (mood === 'mute') return;
+    // Force reset state so nothing blocks us
+    this.isPlaying = false;
+    this.generating = false;
+    this.pendingMood = null;
+    this.currentMood = null;
+    await this._startMood(mood);
   }
 
   stop() {
     this._clearRegenTimer();
     this.enabled = false;
     this.isPlaying = false;
+    this.generating = false;
     this.pendingMood = null;
     this.currentMood = null;
     this.onStopAudio();

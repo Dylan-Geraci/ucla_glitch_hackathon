@@ -567,9 +567,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (musicManager) {
         musicManager.setEnabled(msg.enabled);
         if (msg.enabled) {
-          // Trigger an initial mood check for the current tab
+          // Start fresh — bypass onCycle guards
           chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs[0]?.url) musicManager.onCycle(tabs[0].url);
+            if (tabs[0]?.url) musicManager.startForUrl(tabs[0].url);
           });
         }
       }
