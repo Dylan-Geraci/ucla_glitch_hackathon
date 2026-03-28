@@ -186,6 +186,7 @@ ipcMain.handle('init-agent', async (_, { apiKey }) => {
     if (!browserView) createBrowserView();
     geminiClient = new GeminiLiveClient(apiKey, mainWindow, browserView);
     screenshotManager = new ScreenshotManager(mainWindow, browserView, geminiClient);
+    geminiClient.screenshotManager = screenshotManager;
     await geminiClient.connect();
     return { success: true };
   } catch (e) {
@@ -207,7 +208,9 @@ ipcMain.handle('toggle-agent', (_, { active }) => {
 
 ipcMain.handle('send-voice-message', async (_, { audioBase64, mimeType }) => {
   if (!geminiClient) return { error: 'Agent not initialized' };
-  return await geminiClient.sendAudio(audioBase64, mimeType);
+  const result = await geminiClient.sendAudio(audioBase64, mimeType);
+  if (screenshotManager) screenshotManager.markSpoke();
+  return result;
 });
 
 ipcMain.handle('send-text-message', async (_, { text }) => {

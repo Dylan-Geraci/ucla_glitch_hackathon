@@ -28,14 +28,14 @@ Always respond concisely — your response will be spoken aloud.`;
 const TOOL_DECLARATIONS = [
   {
     name: 'highlight_answer',
-    description: 'Highlight a DOM element on the page that contains the answer. Use this whenever you identify where the answer is.',
+    description: 'Find and highlight text on the page that contains the answer, and explain it verbally. Use a short unique snippet of the visible text you want to highlight.',
     parameters: {
       type: 'object',
       properties: {
-        selector: { type: 'string', description: 'CSS selector of the element to highlight.' },
+        text: { type: 'string', description: 'A short, unique snippet of visible text on the page to find and highlight (5-15 words).' },
         explanation: { type: 'string', description: 'Spoken explanation to give while the element is highlighted.' },
       },
-      required: ['selector', 'explanation'],
+      required: ['text', 'explanation'],
     },
   },
   {
@@ -86,6 +86,7 @@ class GeminiLiveClient {
     this.model = 'gemini-3.1-flash-lite-preview';
     this.connected = false;
     this.lastScreenshotData = null; // raw base64, no data URL prefix
+    this.screenshotManager = null; // set after init
     // Disable thinking to avoid thought_signature issues in multi-turn tool calls
     this.thinkingConfig = { thinkingBudget: 0 };
   }
@@ -114,7 +115,18 @@ class GeminiLiveClient {
       // Attach last screenshot as visual context if available
       if (this.lastScreenshotData) {
         parts.push({ inlineData: { mimeType: 'image/jpeg', data: this.lastScreenshotData } });
-        parts.push({ text: 'Above is the current page screenshot for context.' });
+      }
+
+      // Always include page text so the model doesn't need to call get_page_text first
+      if (this.browserView) {
+        try {
+          const pageText = await this.browserView.webContents.executeJavaScript(
+            `document.body.innerText.slice(0, 4000)`
+          );
+          if (pageText) {
+            parts.push({ text: `Current page text:\n${pageText}\n\nThe user said:` });
+          }
+        } catch (e) { /* ignore if page text fails */ }
       }
 
       parts.push({ inlineData: { mimeType, data: audioBase64 } });
@@ -152,8 +164,8 @@ class GeminiLiveClient {
         const result = await this._executeTool(name, args || {});
 
         // If highlight_answer, its explanation IS the spoken response
-        if (name === 'highlight_answer' && args.explanation) {
-          spokenText = args.explanation;
+        if (name === 'highlight_answer') {
+          spokenText = args.explanation || `I highlighted "${args.text}" on the page.`;
         } else if (name === 'get_page_text') {
           // Make a fresh call with the page text baked in — avoids thought_signature replay issue
           try {
@@ -186,6 +198,7 @@ class GeminiLiveClient {
 
     if (spokenText) {
       this.mainWindow.webContents.send('agent-text', { text: spokenText });
+      if (this.screenshotManager) this.screenshotManager.markSpoke();
     }
     this.mainWindow.webContents.send('agent-turn-complete');
   }
@@ -244,18 +257,36 @@ class GeminiLiveClient {
     try {
       switch (name) {
         case 'highlight_answer': {
-          await bv.webContents.executeJavaScript(`
+          const found = await bv.webContents.executeJavaScript(`
             (function() {
-              const el = document.querySelector(${JSON.stringify(args.selector)});
-              if (!el) return false;
-              const prev = el.style.cssText;
-              el.style.cssText += ';outline:3px solid #00E5FF !important;box-shadow:0 0 16px rgba(0,229,255,0.5) !important;background-color:rgba(0,229,255,0.12) !important;transition:all 0.3s ease !important;';
-              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              setTimeout(() => { el.style.cssText = prev; }, 4000);
+              function normalize(s) { return s.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\\s+/g, ' ').trim(); }
+              const searchText = normalize(${JSON.stringify(args.text)});
+              // Get meaningful words (3+ chars) for matching
+              const keywords = searchText.split(' ').filter(w => w.length >= 3).slice(0, 5);
+              if (keywords.length === 0) return false;
+
+              // Search block-level elements — their innerText includes all child spans
+              const candidates = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, th, dd, blockquote, figcaption');
+              let best = null, bestScore = 0;
+              for (const el of candidates) {
+                const norm = normalize(el.innerText);
+                const score = keywords.filter(w => norm.includes(w)).length;
+                if (score > bestScore && score >= Math.min(3, keywords.length)) {
+                  best = el;
+                  bestScore = score;
+                }
+              }
+              if (!best) return false;
+
+              const prev = best.style.cssText;
+              best.style.cssText += ';outline:3px solid #00E5FF !important;box-shadow:0 0 20px rgba(0,229,255,0.5) !important;background-color:rgba(0,229,255,0.15) !important;transition:all 0.3s ease !important;border-radius:4px !important;';
+              best.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              setTimeout(() => { best.style.cssText = prev; }, 5000);
               return true;
             })()
           `);
-          return args.explanation || 'Highlighted.';
+          console.log('[Highlight]', found ? 'Applied on page' : 'Text not found');
+          return found ? (args.explanation || 'Highlighted.') : 'Could not find that text on the page.';
         }
         case 'scroll_to_text': {
           const found = await bv.webContents.executeJavaScript(`

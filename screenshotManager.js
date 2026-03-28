@@ -14,6 +14,12 @@ class ScreenshotManager {
     this.lastScreenshotTime = 0;
     this.navigationCooldown = 2000; // wait 2s after nav before capturing
     this.lastScreenshotHash = null;
+    this.lastSpokeTime = 0; // timestamp of last agent speech
+  }
+
+  // Call this after the agent speaks so the timer knows to skip
+  markSpoke() {
+    this.lastSpokeTime = Date.now();
   }
 
   // frequency: 0.0 (never) → 1.0 (very often)
@@ -61,6 +67,11 @@ class ScreenshotManager {
 
   async _capture() {
     if (!this.browserView || !this.geminiClient?.connected) return;
+    // Skip if agent spoke within the last 15 seconds
+    if (Date.now() - this.lastSpokeTime < 15000) {
+      console.log('[ScreenshotManager] Skipped — agent spoke recently');
+      return;
+    }
     try {
       const image = await this.browserView.webContents.capturePage();
 

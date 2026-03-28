@@ -116,6 +116,8 @@ micBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording()
 
 async function startRecording() {
   if (isRecording) return;
+  // Immediately stop any agent speech so it doesn't talk over the user
+  window.speechSynthesis.cancel();
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     audioChunks = [];
@@ -174,9 +176,15 @@ window.agent.on('agent-text', ({ text }) => {
   if (!text) return;
   setCommentary(text, false);
   // Speak the response aloud using browser TTS
-  window.speechSynthesis.cancel(); // stop any in-progress speech
+  window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 1.05;
+  utterance.rate = 1.0;
+  // Pick the best available voice — prefer natural/premium voices on macOS
+  const voices = window.speechSynthesis.getVoices();
+  const preferred = voices.find(v => v.name.includes('Samantha') || v.name.includes('Daniel'))
+    || voices.find(v => v.lang.startsWith('en') && v.localService)
+    || voices[0];
+  if (preferred) utterance.voice = preferred;
   utterance.onend = () => setCommentary('Agent active — watching…', false);
   window.speechSynthesis.speak(utterance);
 });
