@@ -1,6 +1,7 @@
 // content.js — Injected into every page for DOM operations
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  console.log('[Content] Received:', msg.type, msg);
   if (msg.type === 'highlight_answer') {
     const result = highlightAnswer(msg.text);
     sendResponse({ found: result });
@@ -15,9 +16,53 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   } else if (msg.type === 'inject_annotation') {
     injectAnnotation(msg.text, msg.x, msg.y, msg.duration);
     sendResponse({ ok: true });
+  } else if (msg.type === 'annotate_element') {
+    const res = annotateElement(msg.target, msg.text);
+    sendResponse({ found: res });
   }
-  return false; // synchronous response
+  return false;
 });
+
+function findElement(searchText) {
+  const normalize = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const target = normalize(searchText);
+  console.log('[Content] normalize search:', target);
+
+  // Helper to search deep (including Shadow DOM)
+  function findDeep(root, targetLabel, targetText) {
+    const labeled = root.querySelector(`[data-agent-label="${targetLabel}"]`);
+    if (labeled) return labeled;
+
+    const selectors = 'button, a, input, label, [role="button"], [role="tab"], [onclick], h1, h2, h3, h4, p, span, div';
+    const elements = root.querySelectorAll(selectors);
+    let best = null;
+    let bestScore = 0;
+
+    for (const el of elements) {
+      if (el.shadowRoot) {
+        const found = findDeep(el.shadowRoot, targetLabel, targetText);
+        if (found) return found;
+      }
+      
+      const texts = [
+        el.innerText, el.value, el.getAttribute('aria-label'), el.title, el.getAttribute('alt')
+      ].filter(Boolean).map(normalize);
+
+      for (const t of texts) {
+        if (t === targetText) return el;
+        if (t.includes(targetText) || targetText.includes(t)) {
+          const score = targetText.length / Math.max(t.length, 1);
+          if (score > bestScore) { best = el; bestScore = score; }
+        }
+      }
+    }
+    return best;
+  }
+
+  const found = findDeep(document, searchText.toUpperCase(), target);
+  console.log('[Content] findElement found:', found);
+  return found;
+}
 
 function highlightAnswer(searchText) {
   function normalize(s) {
@@ -67,68 +112,7 @@ function scrollToText(text) {
 }
 
 function clickElement(searchText) {
-  const normalize = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
-  const target = normalize(searchText);
-
-  // 1. Try to find by agent-assigned label (L1, B2, etc.)
-  const labeled = document.querySelector(`[data-agent-label="${searchText.toUpperCase()}"]`);
-  if (labeled) {
-    labeled.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    labeled.click();
-    return true;
-  }
-
-  // Clickable elements: buttons, links, inputs, labels, radio buttons, checkboxes, etc.
-  const selectors = 'button, a, input[type="button"], input[type="submit"], input[type="radio"], input[type="checkbox"], label, select, [role="button"], [role="radio"], [role="checkbox"], [role="tab"], [role="menuitem"], [onclick]';
-  const candidates = document.querySelectorAll(selectors);
-
-  let best = null;
-  let bestScore = 0;
-
-  for (const el of candidates) {
-    // Check visible text, value, aria-label, title
-    const texts = [
-      el.innerText,
-      el.value,
-      el.getAttribute('aria-label'),
-      el.title,
-      el.getAttribute('alt'),
-    ].filter(Boolean).map(normalize);
-
-    for (const t of texts) {
-      // Exact match
-      if (t === target) { best = el; bestScore = 100; break; }
-      // Contains match
-      if (t.includes(target) || target.includes(t)) {
-        const score = target.length / Math.max(t.length, 1) * 50;
-        if (score > bestScore) { best = el; bestScore = score; }
-      }
-    }
-    if (bestScore === 100) break;
-
-    // Also check associated label text for radio/checkbox inputs
-    if (el.tagName === 'LABEL') {
-      const labelText = normalize(el.innerText);
-      if (labelText === target || labelText.includes(target)) {
-        best = el;
-        bestScore = 100;
-        break;
-      }
-    }
-  }
-
-  if (!best) {
-    // Fallback: search all elements by text content
-    const all = document.querySelectorAll('*');
-    for (const el of all) {
-      if (el.children.length > 3) continue; // skip containers
-      const t = normalize(el.innerText || '');
-      if (t === target && (el.click || el.tagName === 'LABEL')) {
-        best = el;
-        break;
-      }
-    }
-  }
+  const best = findElement(searchText);
 
   if (!best) return false;
 
@@ -149,18 +133,22 @@ function clickElement(searchText) {
 }
 
 function getStructuredPageText() {
-  const elements = document.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"]');
+  const prioritySelectors = ['main', '#main', '#search', '#content', '#rso', '.main-content', 'article'];
+  const interactiveSelectors = 'a, button, input[type="button"], input[type="submit"], [role="button"]';
+  
   let linkIdx = 1;
   let btnIdx = 1;
   let lines = [`TITLE: ${document.title}`];
+  let seen = new Set();
 
-  elements.forEach(el => {
+  function processElement(el) {
+    if (seen.has(el)) return;
     const rect = el.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top <= window.innerHeight) {
       const text = (el.innerText || el.value || el.ariaLabel || el.title || "").trim().replace(/\s+/g, ' ');
       if (!text || text.length < 2) return;
 
-      // Filter out meta-information and noisy elements
+      // Filter out meta-information
       const lower = text.toLowerCase();
       const excluded = ['about this result', 'feedback', 'privacy', 'terms', 'learn more', 'about the source', 'ai overview'];
       if (excluded.some(phrase => lower.includes(phrase))) return;
@@ -170,8 +158,20 @@ function getStructuredPageText() {
       const label = `${tag}${idx}`;
       el.setAttribute('data-agent-label', label);
       lines.push(`[${label}: ${text.slice(0, 60)}]`);
+      seen.add(el);
+    }
+  }
+
+  // 1. Process Priority Elements First (Main Content / Search Results)
+  prioritySelectors.forEach(selector => {
+    const container = document.querySelector(selector);
+    if (container) {
+      container.querySelectorAll(interactiveSelectors).forEach(processElement);
     }
   });
+
+  // 2. Process All Other Visible Elements
+  document.querySelectorAll(interactiveSelectors).forEach(processElement);
 
   const bodyText = document.body.innerText.split('\n')
     .map(l => l.trim())
@@ -182,29 +182,75 @@ function getStructuredPageText() {
   return lines.join('\n') + '\n\n--- TEXT SLICE ---\n' + bodyText;
 }
 
+function annotateElement(searchText, annotationText) {
+  const el = findElement(searchText);
+  if (!el) return false;
+
+  const rect = el.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const prev = el.style.cssText;
+  el.style.cssText += ';outline:3px solid #3dffa0 !important;box-shadow:0 0 15px #3dffa080 !important;transition:all 0.3s ease !important;';
+  
+  injectAnnotation(annotationText, x + 20, y - 40);
+  
+  setTimeout(() => { el.style.cssText = prev; }, 4000);
+  return true;
+}
+
 function injectAnnotation(text, x, y, duration = 4000) {
   const div = document.createElement('div');
   div.style.cssText = `
     position: fixed;
     left: ${x}px; top: ${y}px;
-    background: rgba(10,10,20,0.92);
+    background: rgba(10,10,20,0.95);
     color: #c8f7e8;
-    font-family: 'Courier New', monospace;
-    font-size: 13px;
-    padding: 8px 14px;
-    border-radius: 8px;
+    font-family: 'Outfit', sans-serif;
+    font-size: 14px;
+    padding: 12px 18px;
+    border-radius: 12px;
     border: 1px solid #3dffa0;
-    box-shadow: 0 0 20px #3dffa040;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 0 15px #3dffa040;
     z-index: 2147483647;
-    max-width: 320px;
+    max-width: 280px;
     pointer-events: none;
-    animation: agentFadeIn 0.3s ease;
+    backdrop-filter: blur(8px);
+    transition: all 0.3s ease;
+    animation: agentPopIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
   `;
   div.textContent = text;
 
-  const style = document.createElement('style');
-  style.textContent = '@keyframes agentFadeIn { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:translateY(0); } }';
-  document.head.appendChild(style);
+  // Add a small pointer triangle
+  const arrow = document.createElement('div');
+  arrow.style.cssText = `
+    position: absolute;
+    bottom: -8px; left: 20px;
+    width: 0; height: 0;
+    border-left: 8px solid transparent;
+    border-right: 8px solid transparent;
+    border-top: 8px solid #3dffa0;
+  `;
+  div.appendChild(arrow);
+
+  const styleId = 'agent-annotation-styles';
+  if (!document.getElementById(styleId)) {
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = `
+      @keyframes agentPopIn { 
+        0% { opacity:0; transform: scale(0.8) translateY(10px); } 
+        100% { opacity:1; transform: scale(1) translateY(0); } 
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  
   document.body.appendChild(div);
-  setTimeout(() => div.remove(), duration);
+  setTimeout(() => {
+    div.style.opacity = '0';
+    div.style.transform = 'scale(0.8) translateY(10px)';
+    setTimeout(() => div.remove(), 400);
+  }, duration);
 }

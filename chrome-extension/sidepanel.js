@@ -10,20 +10,24 @@ const mainPanel      = document.getElementById('main-panel');
 const statusDot      = document.getElementById('status-dot');
 const agentToggle    = document.getElementById('agent-toggle');
 const freqSlider     = document.getElementById('freq-slider');
+const volumeSlider   = document.getElementById('volume-slider');
 const micBtn         = document.getElementById('mic-btn');
-const commentary     = document.getElementById('commentary');
+const historyContainer = document.getElementById('history-container');
 const screenshotFlash = document.getElementById('screenshot-flash');
 const keyBtn         = document.getElementById('key-btn');
 const textInput      = document.getElementById('text-input');
 const sendBtn        = document.getElementById('send-btn');
 const musicToggle    = document.getElementById('music-toggle');
 const musicStatus    = document.getElementById('music-status');
+const agentThinking  = document.getElementById('agent-thinking');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let isRecording = false;
 let musicAudio = null;
+let musicVol = 0.25;
 let currentMusicDataUrl = null;
 let turnTimeout = null;
+let chatHistory = []; // { role: 'user'|'agent'|'status', text: string }
 
 function startTurnTimeout(ms = 15000) {
   clearTurnTimeout();
@@ -45,6 +49,9 @@ let nextPlayTime = 0;
 function initPlayback() {
   if (!playbackCtx || playbackCtx.state === 'closed') {
     playbackCtx = new AudioContext({ sampleRate: 24000 });
+  }
+  if (playbackCtx.state === 'suspended') {
+    playbackCtx.resume().catch(e => console.warn('Audio resume failed:', e));
   }
 }
 
@@ -96,6 +103,7 @@ connectBtn.addEventListener('click', async () => {
 
   chrome.runtime.sendMessage({ action: 'init-agent', apiKey: key }, (result) => {
     if (result?.success) {
+      initPlayback(); // Prime audio on successful connection
       setupOverlay.classList.add('hidden');
       mainPanel.classList.add('active');
     } else {
@@ -108,6 +116,7 @@ connectBtn.addEventListener('click', async () => {
 
 // Auto-connect if key saved
 chrome.runtime.sendMessage({ action: 'get-api-key' }, (result) => {
+  loadHistory();
   if (result?.apiKey) {
     apiKeyInput.value = result.apiKey;
     connectBtn.click();
@@ -132,13 +141,44 @@ keyBtn.addEventListener('click', () => {
 
 // ─── Agent Toggle ────────────────────────────────────────────────────────────
 agentToggle.addEventListener('change', () => {
-  chrome.runtime.sendMessage({ action: 'toggle-agent', active: agentToggle.checked });
-  setCommentary(agentToggle.checked ? 'Agent active — watching...' : 'Agent paused.', !agentToggle.checked);
+  const active = agentToggle.checked;
+  if (active) initPlayback(); // Prime audio on toggle
+  chrome.storage.local.set({ agentActive: active });
+  chrome.runtime.sendMessage({ action: 'toggle-agent', active });
+  if (active) addMessage('status', 'Agent active — watching...');
+  else addMessage('status', 'Agent paused.');
 });
 
 // ─── Frequency Slider ────────────────────────────────────────────────────────
 freqSlider.addEventListener('input', () => {
-  chrome.runtime.sendMessage({ action: 'set-frequency', value: parseFloat(freqSlider.value) });
+  const value = parseFloat(freqSlider.value);
+  chrome.storage.local.set({ agentFreq: value });
+  chrome.runtime.sendMessage({ action: 'set-frequency', value });
+});
+
+// Load settings
+chrome.storage.local.get(['agentActive', 'agentFreq', 'musicVol'], (data) => {
+  if (data.agentActive !== undefined) {
+    agentToggle.checked = data.agentActive;
+    chrome.runtime.sendMessage({ action: 'toggle-agent', active: data.agentActive });
+  }
+  if (data.agentFreq !== undefined) {
+    freqSlider.value = data.agentFreq;
+    chrome.runtime.sendMessage({ action: 'set-frequency', value: data.agentFreq });
+  }
+  if (data.musicVol !== undefined) {
+    musicVol = data.musicVol;
+    volumeSlider.value = musicVol;
+  }
+});
+
+// ─── Volume Slider ──────────────────────────────────────────────────────────
+volumeSlider.addEventListener('input', () => {
+  musicVol = parseFloat(volumeSlider.value);
+  chrome.storage.local.set({ musicVol });
+  if (musicAudio) {
+    musicAudio.volume = musicVol;
+  }
 });
 
 // ─── Music Toggle ────────────────────────────────────────────────────────────
@@ -202,8 +242,10 @@ textInput.addEventListener('keydown', (e) => {
 function sendTextMessage() {
   const text = textInput.value.trim();
   if (!text) return;
+  initPlayback(); // Prime audio on text send
   textInput.value = '';
-  setCommentary('Thinking...', false);
+  addMessage('user', text);
+  if (agentThinking) agentThinking.classList.remove('hidden');
   startTurnTimeout(); // Reset if no response in 15s
   chrome.runtime.sendMessage({ action: 'send-text', text });
 }
@@ -223,12 +265,13 @@ function handleBackgroundMessage(msg) {
 
     case 'agent-turn-start':
       // New response — clear any old queued audio
+      if (agentThinking) agentThinking.classList.remove('hidden');
       stopVoicePlayback();
       break;
 
     case 'agent-text':
-      if (!msg.text) break;
-      setCommentary(msg.text, false);
+      if (!msg.text || msg.text === 'Thinking...') break;
+      addMessage('agent', msg.text);
       break;
 
     case 'agent-audio':
@@ -242,10 +285,11 @@ function handleBackgroundMessage(msg) {
       break;
 
     case 'agent-turn-complete':
+      if (agentThinking) agentThinking.classList.add('hidden');
       clearTurnTimeout();
       setTimeout(() => {
         if (!isRecording) {
-          setCommentary('Agent active — watching...', false);
+          setCommentary('GEORGE_LIVE: WATCHING', false);
         }
       }, 1500);
       break;
@@ -270,8 +314,8 @@ function handleBackgroundMessage(msg) {
       }
       const newAudio = createMusicAudio(dataUrl);
       newAudio.play().then(() => {
-        musicStatus.textContent = msg.mood;
-        fadeAudio(newAudio, 0, 0.25, 5000);
+        musicStatus.textContent = `BPM: ${msg.mood.toUpperCase()}`;
+        fadeAudio(newAudio, 0, musicVol, 5000);
       }).catch(e => {
         console.error('[Music] Play failed:', e);
         musicStatus.textContent = 'Error';
@@ -283,7 +327,7 @@ function handleBackgroundMessage(msg) {
 
     case 'music-stop':
       stopMusicAudio();
-      musicStatus.textContent = musicToggle.checked ? 'Paused' : 'Off';
+      musicStatus.textContent = musicToggle.checked ? 'BPM: PAUSED' : 'BPM: OFF';
       break;
   }
 }
@@ -309,7 +353,7 @@ function createMusicAudio(dataUrl) {
 
     const clone = createMusicAudio(dataUrl);
     clone.play().then(() => {
-      fadeAudio(clone, 0, 0.25, 3000);
+      fadeAudio(clone, 0, musicVol, 3000);
       fadeAudio(audio, audio.volume, 0, 3000, () => { audio.pause(); });
     }).catch(() => {});
     musicAudio = clone;
@@ -341,8 +385,71 @@ function stopMusicAudio() {
   currentMusicDataUrl = null;
 }
 
+// ─── History Management ─────────────────────────────────────────────────────
+
+function addMessage(role, text) {
+  if (!text) return;
+  
+  // Status messages are temporary and shouldn't bloat history if possible,
+  if (role !== 'status') {
+    chatHistory.push({ role, text });
+    if (chatHistory.length > 50) chatHistory.shift();
+    saveHistory();
+  } else {
+    // If it's a status message, we might want to show it in the thinking/status area
+    if (agentThinking) {
+      agentThinking.textContent = text.toUpperCase();
+      agentThinking.classList.remove('hidden');
+    }
+    return; // Don't render status in chat history for this design
+  }
+
+  renderMessage(role, text);
+}
+
+function renderMessage(role, text) {
+  const div = document.createElement('div');
+  div.className = `message ${role}-msg`;
+  div.textContent = text;
+  
+  // Remove any existing status or thinking messages
+  if (role === 'status') {
+    const existing = historyContainer.querySelectorAll('.status-msg');
+    existing.forEach(el => el.remove());
+  }
+
+  historyContainer.appendChild(div);
+  historyContainer.scrollTop = historyContainer.scrollHeight;
+}
+
+function saveHistory() {
+  chrome.storage.local.set({ chatHistory });
+}
+
+function loadHistory() {
+  chrome.storage.local.get('chatHistory', (data) => {
+    if (data.chatHistory) {
+      chatHistory = data.chatHistory;
+      historyContainer.innerHTML = '';
+      chatHistory.forEach(m => renderMessage(m.role, m.text));
+    }
+  });
+}
+
+function clearHistory() {
+  chatHistory = [];
+  chrome.storage.local.remove('chatHistory');
+  historyContainer.innerHTML = '<div class="welcome-msg">History cleared. Agent standing by...</div>';
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function setCommentary(text, idle = false) {
-  commentary.textContent = text;
-  commentary.classList.toggle('idle', idle);
+  // Backwards compatibility or direct status updates
+  if (idle && !text.includes('Listening')) {
+    // Just a status update
+    addMessage('status', text);
+  } else {
+    // If it's a specific instruction, treat as agent message
+    addMessage('status', text);
+  }
 }

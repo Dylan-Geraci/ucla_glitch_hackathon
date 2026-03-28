@@ -3,68 +3,82 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Browsing Agent</title>
+  <title>Gemini Browsing Hub</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 
-  <!-- Setup Overlay -->
+  <!-- Setup Overlay (Glass Card) -->
   <div id="setup-overlay">
     <div class="setup-card">
-      <h2>Browsing Agent</h2>
-      <p>Enter your Google Gemini API key to activate your AI browsing companion. Your key is stored locally.</p>
-      <input type="password" id="api-key-input" placeholder="AIza..." autocomplete="off" />
-      <button id="connect-btn">Connect Agent</button>
+      <div class="glitch-logo">GEORGE_HUB</div>
+      <p>Activate your AI browsing companion.</p>
+      <div class="input-group">
+        <input type="password" id="api-key-input" placeholder="Enter Gemini API Key..." autocomplete="off" />
+        <button id="connect-btn">INITIALIZE</button>
+      </div>
       <div class="error" id="setup-error"></div>
     </div>
   </div>
 
-  <!-- Screenshot flash overlay -->
   <div id="screenshot-flash"></div>
 
-  <!-- Main Panel (shown after connect) -->
-  <div id="main-panel">
-    <!-- Agent Controls -->
-    <div class="controls-section">
+  <!-- Main App Container -->
+  <div id="main-panel" class="app-container">
+    
+    <!-- Top Toolbar (Control Center) -->
+    <header class="control-center">
       <div class="control-row">
-        <div class="status-dot" id="status-dot"></div>
-        <label class="toggle-label">Agent</label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="agent-toggle" />
-          <span class="slider"></span>
-        </label>
-        <button id="key-btn">Change Key</button>
+        <div class="status-group">
+          <div class="status-dot" id="status-dot"></div>
+          <span class="status-label">GEORGE_LIVE</span>
+        </div>
+        
+        <div class="toolbar-actions">
+          <button id="key-btn" title="Reset API Key">⚙️</button>
+          <label class="toggle-switch agent-toggle">
+            <input type="checkbox" id="agent-toggle" />
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
 
-      <div class="control-row">
-        <span class="freq-label">Quiet</span>
-        <input type="range" id="freq-slider" min="0" max="1" step="0.01" value="0.1" />
-        <span class="freq-label">Chatty</span>
+      <div class="sliders-group">
+        <div class="slider-item">
+          <span class="sl-label">PROACTIVE</span>
+          <input type="range" id="freq-slider" min="0" max="1" step="0.01" value="0.1" />
+        </div>
+        <div class="slider-item">
+          <span class="sl-label">MUSIC_VOL</span>
+          <div class="music-controls">
+            <input type="checkbox" id="music-toggle" />
+            <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="0.25" />
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- The Console (Unified History + Input) -->
+    <main class="console-box">
+      <div id="history-container">
+        <div class="welcome-msg">--- AGENT INITIALIZED ---</div>
       </div>
 
-      <div class="control-row">
-        <label class="toggle-label">Music</label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="music-toggle" />
-          <span class="slider"></span>
-        </label>
-        <span id="music-status" class="freq-label">Off</span>
+      <div class="input-dock">
+        <div class="dock-main">
+          <button id="mic-btn" class="mic-icon" title="Voice Input">🎙</button>
+          <input type="text" id="text-input" placeholder="Ask GEORGE anything..." autocomplete="off" />
+          <button id="send-btn" class="send-icon">↵</button>
+        </div>
+        <div class="dock-info">
+          <span id="music-status">BPM: IDLE</span>
+          <span id="agent-thinking" class="hidden">THINKING...</span>
+        </div>
       </div>
-    </div>
+    </main>
 
-    <!-- Mic Button -->
-    <button id="mic-btn" title="Hold to speak">🎙</button>
-
-    <!-- Commentary -->
-    <div id="commentary" class="idle">Agent standing by...</div>
-
-    <!-- Text Input -->
-    <div class="text-input-row">
-      <input type="text" id="text-input" placeholder="Type a message..." />
-      <button id="send-btn">Send</button>
-    </div>
   </div>
 
   <script src="sidepanel.js"></script>

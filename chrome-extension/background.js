@@ -9,7 +9,7 @@ const WS_BASE = 'wss://generativelanguage.googleapis.com/ws/google.ai.generative
 const REST_MODEL = 'gemini-3.1-flash-lite-preview';
 const REST_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-const SYSTEM_PROMPT = `You are an intelligent, witty browsing companion built into the user's browser.
+const SYSTEM_PROMPT = `You are an intelligent, witty browsing companion named GEORGE, built into the user's browser.
 You observe what the user is looking at via periodic screenshots and can hear them via microphone.
 
 Your personality:
@@ -27,6 +27,7 @@ CRITICAL RULES — follow these in priority order:
    - You receive structured page context. Links are [L1: Text], [L2: Text], etc. Buttons are [B1: Text].
    - To open a link, use click_element with the label (e.g., "L1") or the text.
    - If asked for the "first link", use "L1".
+   - LOCATION QUERIES: If the user asks "Where is X?", "Point to X", or "Show me X", do NOT click it. Use draw_annotation to visually highlight it instead.
    - CRITICAL: Focus on primary search results and titles. Avoid clicking small informational icons, "About this result", or "Feedback" panels.
    - MULTI-STEP: If asked to "open" a topic and you are not on the right page, first navigate to a search (e.g., google.com/search?q=Topic). Once the results page finishes loading, you will AUTOMATICALLY receive updated [L1, L2...] context. Then, pick the best result and click it.
 3. VERBAL CONFIRMATION:
@@ -35,7 +36,15 @@ CRITICAL RULES — follow these in priority order:
    - When the user asks a question about the page, use the provided text context.
    - If page text says "No page text available", do NOT make up content.
 
-Your response will be spoken aloud — keep it concise (1-3 sentences). Do NOT read out URLs.`;
+Your response will be spoken aloud — keep it concise (1-3 sentences). Do NOT read out URLs.
+
+5. VISUAL POINTING: 
+   - Use draw_annotation to point at specific elements (labels like L1 or text) when explaining parts of the page or highlighting answers. This helps the user see exactly what you are referring to.
+
+6. PROACTIVE BEHAVIOR:
+   - You will receive [SYSTEM OBSERVATION] or [Updated page context]. 
+   - If you receive a [SYSTEM OBSERVATION], you MUST share a brief, witty, or helpful spoken comment about it with the user.
+   - If you receive an [Updated page context], only speak if the user is waiting for a result or if something changed drastically. Otherwise, stay silent.`;
 
 const TOOL_DECLARATIONS = [
   {
@@ -63,7 +72,7 @@ const TOOL_DECLARATIONS = [
   { name: 'reload_page', description: 'Reload the current page.', parameters: { type: 'object', properties: {} } },
   {
     name: 'click_element',
-    description: 'Click a button, link, radio, checkbox, or interactive element by its visible text label.',
+    description: 'Perform an action (click, open, select) on an element. Use this when the user wants to navigate or interact.',
     parameters: {
       type: 'object',
       properties: { text: { type: 'string', description: 'Visible text label of the element to click.' } },
@@ -89,6 +98,18 @@ const TOOL_DECLARATIONS = [
       required: ['query'],
     },
   },
+  {
+    name: 'draw_annotation',
+    description: 'Identify the location of an element without clicking it. Use this for "Where is..." or "Point at..." queries.',
+    parameters: {
+      type: 'object',
+      properties: {
+        element: { type: 'string', description: 'The label (e.g. L1) or text of the element to point at.' },
+        text: { type: 'string', description: 'A short explanation to show in the bubble (1-2 sentences).' },
+      },
+      required: ['element', 'text'],
+    },
+  },
 ];
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -109,8 +130,25 @@ let wsConnectResolve = null;
 let wsConnectReject = null;
 let reconnectAttempts = 0;
 let keepAliveInterval = null;
-let turnInProgress = false;
 let isStreaming = false; // true while mic is actively streaming audio
+let turnTimer = null; // Safety timer to reset turnInProgress
+let pendingToolResponses = 0;
+
+function startTurnTimer(ms = 15000) {
+  clearTurnTimer();
+  turnTimer = setTimeout(() => {
+    if (turnInProgress) {
+      console.log('[WS] Safety timeout: Resetting turn state');
+      turnInProgress = false;
+      pendingToolResponses = 0;
+      sendToSidePanel({ type: 'agent-turn-complete' });
+    }
+  }, ms);
+}
+
+function clearTurnTimer() {
+  if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
+}
 
 // ─── WebSocket Connection ───────────────────────────────────────────────────
 
@@ -188,6 +226,8 @@ function connectWebSocket() {
 }
 
 function onWsMessage(msg) {
+  clearTurnTimer(); // Something happened, reset any safety timer
+  
   if (msg.setupComplete) {
     console.log('[WS] Setup complete — session ready');
     wsReady = true;
@@ -208,6 +248,7 @@ function onWsMessage(msg) {
         turnInProgress = true;
         sendToSidePanel({ type: 'agent-turn-start' });
       }
+      startTurnTimer(); // Keep busy until complete
       for (const part of sc.modelTurn.parts) {
         if (part.text) {
           console.log('[WS] Text:', part.text.slice(0, 100));
@@ -226,17 +267,31 @@ function onWsMessage(msg) {
       }
     }
     if (sc.turnComplete) {
-      console.log('[WS] Turn complete');
-      turnInProgress = false;
-      sendToSidePanel({ type: 'agent-turn-complete' });
+      console.log('[WS] Turn complete in message');
+      if (pendingToolResponses === 0) {
+        console.log('[WS] Ending turn (no pending tools)');
+        turnInProgress = false;
+        clearTurnTimer();
+        sendToSidePanel({ type: 'agent-turn-complete' });
+      } else {
+        console.log('[WS] Turn complete received but waiting for', pendingToolResponses, 'tool responses');
+      }
     }
     return;
   }
 
   if (msg.toolCall) {
     console.log('[WS] Tool call received');
+    turnInProgress = true;
+    pendingToolResponses += msg.toolCall.functionCalls.length;
+    startTurnTimer();
     handleToolCall(msg.toolCall);
     return;
+  }
+
+  if (msg.sessionResumptionUpdate) {
+    console.log('[WS] Session resumption handle received');
+    return; // Silently handle
   }
 
   // Log anything unexpected
@@ -263,6 +318,7 @@ async function handleToolCall(toolCall) {
       id: fc.id,
       response: { result: String(result) },
     });
+    pendingToolResponses = Math.max(0, pendingToolResponses - 1);
   }
 
   if (ws && wsReady) {
@@ -270,6 +326,14 @@ async function handleToolCall(toolCall) {
     ws.send(JSON.stringify({
       toolResponse: { functionResponses: responses }
     }));
+    
+    // If this was the last response and we already got turnComplete, close the turn now
+    if (pendingToolResponses === 0) {
+      console.log('[WS] All tools responded, turn complete');
+      turnInProgress = false;
+      clearTurnTimer();
+      sendToSidePanel({ type: 'agent-turn-complete' });
+    }
   }
 }
 
@@ -297,6 +361,10 @@ async function executeTool(name, args) {
       case 'reload_page':
         await chrome.tabs.reload(tab.id);
         return 'Page reloaded';
+      case 'draw_annotation': {
+        const res = await chrome.tabs.sendMessage(tab.id, { type: 'annotate_element', target: args.element, text: args.text });
+        return res?.found ? `Pointed at "${args.element}"` : `Could not find "${args.element}" to point at`;
+      }
       case 'click_element': {
         let res;
         try {
@@ -413,8 +481,11 @@ function sendSilencePadding() {
 
 // ─── Send page context before voice input ────────────────────────────────────
 
-async function sendPageContextToLive(turnComplete = false) {
-  if (!ws || !wsReady) return;
+async function sendPageContextToLive(turnComplete = true) {
+  if (!ws || !wsReady || turnInProgress) {
+    if (turnInProgress) console.log('[WS] Context push skipped — turn in progress');
+    return;
+  }
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) return;
@@ -445,7 +516,7 @@ async function sendPageContextToLive(turnComplete = false) {
 // ─── Screenshot Capture (uses REST API for text-only, no audio) ─────────────
 
 async function captureScreenshot() {
-  if (!connected || !agentActive) return;
+  if (!connected || !agentActive || turnInProgress) return;
 
   if (Date.now() - lastSpokeTime < 15000) {
     console.log('[Screenshot] Skipped — spoke recently');
@@ -484,9 +555,10 @@ async function captureScreenshot() {
     if (res.ok) {
       const data = await res.json();
       const text = data.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim();
-      if (text && text !== '.') {
-        sendToSidePanel({ type: 'agent-text', text });
-        sendToSidePanel({ type: 'agent-turn-complete' });
+      if (text && text !== '.' && text.length > 5) {
+        // Voice the observation via the Live session
+        console.log('[Screenshot] Observation found:', text);
+        sendTextToLive(`[SYSTEM OBSERVATION]: ${text}\n\nShare this observation with the user in your natural, witty voice as GEORGE.`);
         lastSpokeTime = Date.now();
       }
     }
@@ -516,10 +588,15 @@ function scheduleScreenshot() {
 }
 
 function setFrequency(value) {
-  const min = 30000;
-  const max = 120000;
+  // Value is 0.0 to 1.0 (Quiet to Chatty)
+  const min = 5000;   // 5s for chatty
+  const max = 60000;  // 60s for quiet
   intervalMs = max - value * (max - min);
-  if (agentActive) { stopScreenshots(); startScreenshots(); }
+  console.log(`[Config] Screenshot interval set to ${Math.round(intervalMs/1000)}s`);
+  if (agentActive) { 
+    if (screenshotTimer) { clearTimeout(screenshotTimer); screenshotTimer = null; }
+    scheduleScreenshot(); 
+  }
 }
 
 // ─── Keepalive ──────────────────────────────────────────────────────────────
@@ -683,7 +760,7 @@ let navDebounceTimer = null;
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete') {
     if (wsReady) {
-      sendPageContextToLive(false);
+      sendPageContextToLive(true);
     }
     if (agentActive) {
       clearTimeout(navDebounceTimer);
