@@ -1,4 +1,4 @@
-// sidepanel.js — Side panel UI: mic recording, TTS, agent events
+// sidepanel.js — Side panel UI: mic, Gemini Live audio playback, agent events
 
 // ─── Elements ────────────────────────────────────────────────────────────────
 const setupOverlay   = document.getElementById('setup-overlay');
@@ -21,8 +21,65 @@ const musicStatus    = document.getElementById('music-status');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let isRecording = false;
-let musicAudio = null; // Audio element for background music
-let currentMusicDataUrl = null; // Stored so we can seamlessly self-loop
+let musicAudio = null;
+let currentMusicDataUrl = null;
+let turnTimeout = null;
+
+function startTurnTimeout(ms = 15000) {
+  clearTurnTimeout();
+  turnTimeout = setTimeout(() => {
+    if (!isRecording) {
+      setCommentary('Agent active — watching...', false);
+    }
+  }, ms);
+}
+
+function clearTurnTimeout() {
+  if (turnTimeout) { clearTimeout(turnTimeout); turnTimeout = null; }
+}
+
+// ─── Gemini Voice Playback (PCM via AudioContext) ────────────────────────────
+let playbackCtx = null;
+let nextPlayTime = 0;
+
+function initPlayback() {
+  if (!playbackCtx || playbackCtx.state === 'closed') {
+    playbackCtx = new AudioContext({ sampleRate: 24000 });
+  }
+}
+
+function queuePCMAudio(base64Data) {
+  initPlayback();
+  if (playbackCtx.state === 'suspended') playbackCtx.resume();
+
+  // Decode base64 → Int16 → Float32
+  const binary = atob(base64Data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+  const buffer = playbackCtx.createBuffer(1, float32.length, 24000);
+  buffer.getChannelData(0).set(float32);
+
+  const source = playbackCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(playbackCtx.destination);
+
+  const now = playbackCtx.currentTime;
+  const startAt = Math.max(now + 0.01, nextPlayTime);
+  source.start(startAt);
+  nextPlayTime = startAt + buffer.duration;
+}
+
+function stopVoicePlayback() {
+  nextPlayTime = 0;
+  if (playbackCtx) {
+    playbackCtx.close().catch(() => {});
+    playbackCtx = null;
+  }
+}
 
 // ─── Persistent port to background ──────────────────────────────────────────
 const port = chrome.runtime.connect({ name: 'sidepanel' });
@@ -57,7 +114,6 @@ chrome.runtime.sendMessage({ action: 'get-api-key' }, (result) => {
   }
 });
 
-// Enter to connect
 apiKeyInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') connectBtn.click();
 });
@@ -71,6 +127,7 @@ keyBtn.addEventListener('click', () => {
   connectBtn.textContent = 'Connect Agent';
   connectBtn.disabled = false;
   setupError.textContent = '';
+  stopVoicePlayback();
 });
 
 // ─── Agent Toggle ────────────────────────────────────────────────────────────
@@ -89,7 +146,6 @@ musicToggle.addEventListener('change', () => {
   const enabled = musicToggle.checked;
   chrome.runtime.sendMessage({ action: 'toggle-music', enabled });
   if (!enabled) {
-    // Stop audio immediately in the side panel (don't wait for round-trip)
     stopMusicAudio();
     musicStatus.textContent = 'Off';
   } else {
@@ -97,28 +153,25 @@ musicToggle.addEventListener('change', () => {
   }
 });
 
-// ─── Microphone / Voice Input (toggle mode) ─────────────────────────────────
-// Click once to start, click again to stop
+// ─── Microphone / Voice Input ───────────────────────────────────────────────
 micBtn.addEventListener('click', toggleRecording);
 
 function toggleRecording() {
-  if (isRecording) {
-    stopRecording();
-  } else {
-    startRecording();
-  }
+  if (isRecording) stopRecording();
+  else startRecording();
 }
 
 async function startRecording() {
   if (isRecording) return;
-  // Immediately stop any agent speech so it doesn't talk over the user
-  window.speechSynthesis.cancel();
+  stopVoicePlayback(); // Stop any playing agent audio
 
-  // Recording happens in the offscreen document via background
+  // Init playback context (needs user gesture)
+  initPlayback();
+  if (playbackCtx.state === 'suspended') playbackCtx.resume();
+
   chrome.runtime.sendMessage({ action: 'start-recording' }, (res) => {
     if (res?.error) {
       console.error('Mic error:', res.error);
-      // Permission not granted yet — open the permission tab
       setCommentary('Opening mic permission page...', false);
       chrome.tabs.create({ url: chrome.runtime.getURL('mic-permission.html') });
       return;
@@ -136,7 +189,8 @@ function stopRecording() {
   chrome.runtime.sendMessage({ action: 'stop-recording' });
   micBtn.classList.remove('recording');
   statusDot.classList.remove('recording');
-  setCommentary('Thinking...', false);
+  setCommentary('Processing...', false);
+  startTurnTimeout(); // Reset if no response in 15s
 }
 
 // ─── Text Input ──────────────────────────────────────────────────────────────
@@ -150,6 +204,7 @@ function sendTextMessage() {
   if (!text) return;
   textInput.value = '';
   setCommentary('Thinking...', false);
+  startTurnTimeout(); // Reset if no response in 15s
   chrome.runtime.sendMessage({ action: 'send-text', text });
 }
 
@@ -166,26 +221,33 @@ function handleBackgroundMessage(msg) {
       }
       break;
 
+    case 'agent-turn-start':
+      // New response — clear any old queued audio
+      stopVoicePlayback();
+      break;
+
     case 'agent-text':
       if (!msg.text) break;
       setCommentary(msg.text, false);
-      // Speak the response aloud using browser TTS
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(msg.text);
-      utterance.rate = 1.0;
-      const voices = window.speechSynthesis.getVoices();
-      const preferred = voices.find(v => v.name.includes('Samantha') || v.name.includes('Daniel'))
-        || voices.find(v => v.lang.startsWith('en') && v.localService)
-        || voices[0];
-      if (preferred) utterance.voice = preferred;
-      utterance.onend = () => setCommentary('Agent active — watching...', false);
-      window.speechSynthesis.speak(utterance);
+      break;
+
+    case 'agent-audio':
+      if (msg.data) {
+        queuePCMAudio(msg.data);
+      }
+      break;
+
+    case 'agent-status-text':
+      setCommentary(msg.text, false);
       break;
 
     case 'agent-turn-complete':
-      if (!window.speechSynthesis.speaking) {
-        setCommentary('Agent active — watching...', false);
-      }
+      clearTurnTimeout();
+      setTimeout(() => {
+        if (!isRecording) {
+          setCommentary('Agent active — watching...', false);
+        }
+      }, 1500);
       break;
 
     case 'agent-error':
@@ -201,15 +263,11 @@ function handleBackgroundMessage(msg) {
 
     case 'music-play': {
       const dataUrl = `data:${msg.mimeType};base64,${msg.audioData}`;
-
-      // Fade out whatever is currently playing
       if (musicAudio) {
         const old = musicAudio;
         fadeAudio(old, old.volume, 0, 5000, () => { old.pause(); });
         musicAudio = null;
       }
-
-      // Create and start the new clip
       const newAudio = createMusicAudio(dataUrl);
       newAudio.play().then(() => {
         musicStatus.textContent = msg.mood;
@@ -218,7 +276,6 @@ function handleBackgroundMessage(msg) {
         console.error('[Music] Play failed:', e);
         musicStatus.textContent = 'Error';
       });
-
       musicAudio = newAudio;
       currentMusicDataUrl = dataUrl;
       break;
@@ -233,23 +290,20 @@ function handleBackgroundMessage(msg) {
 
 // ─── Music Helpers ──────────────────────────────────────────────────────────
 
-// Create an Audio element with seamless self-loop crossfade
 function createMusicAudio(dataUrl) {
   const audio = new Audio(dataUrl);
   audio.volume = 0;
-  audio.loop = false; // We loop manually to avoid the gap
+  audio.loop = false;
 
   audio.onerror = (e) => {
     console.error('[Music] Playback error:', e);
     musicStatus.textContent = 'Error';
   };
 
-  // When nearing the end, crossfade into a clone of itself (seamless loop)
   let looping = false;
   audio.addEventListener('timeupdate', () => {
     if (looping) return;
     if (!audio.duration || audio.duration - audio.currentTime > 3) return;
-    // Only self-loop if this is still the active audio
     if (musicAudio !== audio) return;
     looping = true;
 
@@ -283,10 +337,7 @@ function fadeAudio(audio, from, to, duration, onDone) {
 }
 
 function stopMusicAudio() {
-  if (musicAudio) {
-    musicAudio.pause();
-    musicAudio = null;
-  }
+  if (musicAudio) { musicAudio.pause(); musicAudio = null; }
   currentMusicDataUrl = null;
 }
 

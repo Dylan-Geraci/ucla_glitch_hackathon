@@ -8,7 +8,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const result = scrollToText(msg.text);
     sendResponse({ found: result });
   } else if (msg.type === 'get_page_text') {
-    sendResponse({ text: document.body.innerText.slice(0, 30000) });
+    sendResponse({ text: getStructuredPageText() });
   } else if (msg.type === 'click_element') {
     const result = clickElement(msg.text);
     sendResponse({ found: result });
@@ -69,6 +69,14 @@ function scrollToText(text) {
 function clickElement(searchText) {
   const normalize = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
   const target = normalize(searchText);
+
+  // 1. Try to find by agent-assigned label (L1, B2, etc.)
+  const labeled = document.querySelector(`[data-agent-label="${searchText.toUpperCase()}"]`);
+  if (labeled) {
+    labeled.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    labeled.click();
+    return true;
+  }
 
   // Clickable elements: buttons, links, inputs, labels, radio buttons, checkboxes, etc.
   const selectors = 'button, a, input[type="button"], input[type="submit"], input[type="radio"], input[type="checkbox"], label, select, [role="button"], [role="radio"], [role="checkbox"], [role="tab"], [role="menuitem"], [onclick]';
@@ -138,6 +146,35 @@ function clickElement(searchText) {
   best.click();
   setTimeout(() => { best.style.cssText = prev; }, 2000);
   return true;
+}
+
+function getStructuredPageText() {
+  const elements = document.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"]');
+  let linkIdx = 1;
+  let btnIdx = 1;
+  let lines = [`TITLE: ${document.title}`];
+
+  elements.forEach(el => {
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top <= window.innerHeight) {
+      const text = (el.innerText || el.value || el.ariaLabel || el.title || "").trim().replace(/\s+/g, ' ');
+      if (!text || text.length < 2) return;
+
+      const tag = (el.tagName === 'A') ? 'L' : 'B';
+      const idx = (tag === 'L') ? linkIdx++ : btnIdx++;
+      const label = `${tag}${idx}`;
+      el.setAttribute('data-agent-label', label);
+      lines.push(`[${label}: ${text.slice(0, 60)}]`);
+    }
+  });
+
+  const bodyText = document.body.innerText.split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 20)
+    .slice(0, 15)
+    .join('\n');
+
+  return lines.join('\n') + '\n\n--- TEXT SLICE ---\n' + bodyText;
 }
 
 function injectAnnotation(text, x, y, duration = 4000) {

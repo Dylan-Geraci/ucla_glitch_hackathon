@@ -1,61 +1,85 @@
-// offscreen.js — Runs in an offscreen document for mic recording
-// This has full DOM access and can use getUserMedia reliably
+// offscreen.js — Captures mic audio as PCM 16kHz mono, streams chunks to background
+// Uses ScriptProcessorNode (deprecated but works, no CSP issues unlike AudioWorklet)
 
-let mediaRecorder = null;
-let audioChunks = [];
+let audioContext = null;
+let mediaStream = null;
+let sourceNode = null;
+let scriptNode = null;
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.target !== 'offscreen') return;
 
   if (msg.action === 'start-recording') {
-    startRecording().then(() => sendResponse({ ok: true }))
+    startStreaming()
+      .then(() => sendResponse({ ok: true }))
       .catch(e => sendResponse({ error: e.name + ': ' + (e.message || 'Permission denied') }));
-    return true; // async
+    return true;
   }
 
   if (msg.action === 'stop-recording') {
-    stopRecording();
+    stopStreaming();
     sendResponse({ ok: true });
   }
 });
 
-async function startRecording() {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  audioChunks = [];
+async function ensureMicAccess() {
+  if (mediaStream && mediaStream.getTracks().every(t => t.readyState === 'live')) return;
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+  });
+}
 
-  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? 'audio/webm;codecs=opus' : 'audio/webm';
-  mediaRecorder = new MediaRecorder(stream, { mimeType });
+async function ensureAudioContext() {
+  if (audioContext && audioContext.state !== 'closed') {
+    if (audioContext.state === 'suspended') await audioContext.resume();
+    return;
+  }
+  audioContext = new AudioContext({ sampleRate: 16000 });
+}
 
-  mediaRecorder.ondataavailable = (e) => {
-    if (e.data.size > 0) audioChunks.push(e.data);
-  };
+async function startStreaming() {
+  if (scriptNode) return;
 
-  mediaRecorder.onstop = async () => {
-    stream.getTracks().forEach(t => t.stop());
-    const blob = new Blob(audioChunks, { type: 'audio/webm' });
-    const arrayBuffer = await blob.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
+  await ensureMicAccess();
+  await ensureAudioContext();
+
+  sourceNode = audioContext.createMediaStreamSource(mediaStream);
+  // 4096 samples at 16kHz = ~256ms per chunk
+  scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+  scriptNode.onaudioprocess = (e) => {
+    const input = e.inputBuffer.getChannelData(0);
+    const int16 = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      int16[i] = Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767)));
+    }
+    const bytes = new Uint8Array(int16.buffer);
     let binary = '';
     for (let i = 0; i < bytes.length; i += 8192) {
       binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
     }
-    const base64 = btoa(binary);
-
-    // Send recorded audio to background for Gemini processing
     chrome.runtime.sendMessage({
       target: 'background',
-      action: 'audio-recorded',
-      audioBase64: base64,
-      mimeType: 'audio/webm',
+      action: 'audio-chunk',
+      data: btoa(binary),
     });
   };
 
-  mediaRecorder.start();
+  sourceNode.connect(scriptNode);
+  scriptNode.connect(audioContext.destination);
+  console.log('[Offscreen] PCM streaming started (16kHz mono)');
 }
 
-function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
+function stopStreaming() {
+  if (scriptNode) {
+    scriptNode.onaudioprocess = null;
+    scriptNode.disconnect();
+    scriptNode = null;
   }
+  if (sourceNode) {
+    sourceNode.disconnect();
+    sourceNode = null;
+  }
+  // Keep audioContext + mediaStream alive to avoid re-prompting permission
+  console.log('[Offscreen] PCM streaming paused');
 }
