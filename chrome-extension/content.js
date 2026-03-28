@@ -12,13 +12,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ text: getStructuredPageText() });
   } else if (msg.type === 'click_element') {
     const result = clickElement(msg.text);
-    sendResponse({ found: result });
+    sendResponse(result);
   } else if (msg.type === 'inject_annotation') {
     injectAnnotation(msg.text, msg.x, msg.y, msg.duration);
     sendResponse({ ok: true });
   } else if (msg.type === 'annotate_element') {
     const res = annotateElement(msg.target, msg.text);
     sendResponse({ found: res });
+  } else if (msg.type === 'scroll_page') {
+    scrollPage(msg.direction, msg.amount || 400);
+    sendResponse({ ok: true });
   }
   return false;
 });
@@ -28,7 +31,22 @@ function findElement(searchText) {
   const target = normalize(searchText);
   console.log('[Content] normalize search:', target);
 
-  // Helper to search deep (including Shadow DOM)
+  // First pass: try exact label match or exact text match on the trimmed first line
+  const allInteractive = document.querySelectorAll(
+    'button, a, input, label, [role="button"], [role="tab"], [onclick], span, div'
+  );
+  for (const el of allInteractive) {
+    // Check data-agent-label first
+    if (el.getAttribute('data-agent-label') === searchText.toUpperCase()) return el;
+    // Exact match on trimmed first line of innerText (handles icon-decorated nav tabs)
+    const firstLine = normalize((el.innerText || '').split('\n')[0]);
+    if (firstLine === target) return el;
+    // Exact match on aria-label or title
+    const aria = normalize(el.getAttribute('aria-label') || el.title || '');
+    if (aria && aria === target) return el;
+  }
+
+  // Second pass: fuzzy score (prefer highest ratio match)
   function findDeep(root, targetLabel, targetText) {
     const labeled = root.querySelector(`[data-agent-label="${targetLabel}"]`);
     if (labeled) return labeled;
@@ -43,12 +61,17 @@ function findElement(searchText) {
         const found = findDeep(el.shadowRoot, targetLabel, targetText);
         if (found) return found;
       }
-      
-      const texts = [
-        el.innerText, el.value, el.getAttribute('aria-label'), el.title, el.getAttribute('alt')
-      ].filter(Boolean).map(normalize);
 
-      for (const t of texts) {
+      const candidates = [
+        normalize((el.innerText || '').split('\n')[0]), // first line only
+        normalize(el.innerText || ''),
+        normalize(el.value || ''),
+        normalize(el.getAttribute('aria-label') || ''),
+        normalize(el.title || ''),
+        normalize(el.getAttribute('alt') || ''),
+      ].filter(Boolean);
+
+      for (const t of candidates) {
         if (t === targetText) return el;
         if (t.includes(targetText) || targetText.includes(t)) {
           const score = targetText.length / Math.max(t.length, 1);
@@ -111,6 +134,24 @@ function scrollToText(text) {
   return false;
 }
 
+function scrollPage(direction, amount) {
+  const scrollEl = document.scrollingElement || document.documentElement;
+  switch (direction) {
+    case 'down':
+      scrollEl.scrollBy({ top: amount, behavior: 'smooth' });
+      break;
+    case 'up':
+      scrollEl.scrollBy({ top: -amount, behavior: 'smooth' });
+      break;
+    case 'top':
+      scrollEl.scrollTo({ top: 0, behavior: 'smooth' });
+      break;
+    case 'bottom':
+      scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
+      break;
+  }
+}
+
 function clickElement(searchText) {
   const best = findElement(searchText);
 
@@ -127,14 +168,23 @@ function clickElement(searchText) {
     if (input) input.click();
   }
 
-  best.click();
   setTimeout(() => { best.style.cssText = prev; }, 2000);
-  return true;
+
+  // Return href if this is a link — background.js will navigate via chrome.tabs.update
+  // which bypasses all JS routing (works on Google, SPAs, etc.)
+  if (best.tagName === 'A' && best.href && !best.href.startsWith('javascript:')) {
+    return { found: true, href: best.href };
+  }
+
+  // Dispatch a real MouseEvent for non-anchor elements
+  const ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+  best.dispatchEvent(ev);
+  return { found: true };
 }
 
 function getStructuredPageText() {
   const prioritySelectors = ['main', '#main', '#search', '#content', '#rso', '.main-content', 'article'];
-  const interactiveSelectors = 'a, button, input[type="button"], input[type="submit"], [role="button"]';
+  const interactiveSelectors = 'a, button, input[type="button"], input[type="submit"], [role="button"], [role="tab"]';
   
   let linkIdx = 1;
   let btnIdx = 1;

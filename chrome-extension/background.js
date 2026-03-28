@@ -19,6 +19,12 @@ Your personality:
 - You speak in short, natural sentences — never walls of text
 
 CRITICAL RULES — follow these in priority order:
+0. PAGE-FIRST (MOST IMPORTANT RULE):
+   - You are ALWAYS given the current page URL and PAGE TEXT with every user message.
+   - BEFORE using any navigation tool (navigate_to_url, click_element, open_new_tab), FIRST check whether the user's question can be answered using the PAGE TEXT already provided.
+   - If the PAGE TEXT contains relevant information (even partially), answer from it directly. Do NOT navigate away.
+   - Only navigate or search externally if the page text is empty, completely unrelated to the question, or the user explicitly asks you to go somewhere else.
+   - Example: User is on a UCLA events page and asks "what events are in February?" → read the PAGE TEXT for February events and answer directly. Do NOT search Google.
 1. TAB MANAGEMENT:
    - "close tab" → use close_tab.
    - "switch tab" → use switch_tab.
@@ -38,11 +44,11 @@ CRITICAL RULES — follow these in priority order:
 
 Your response will be spoken aloud — keep it concise (1-3 sentences). Do NOT read out URLs.
 
-5. VISUAL POINTING: 
+5. VISUAL POINTING:
    - Use draw_annotation to point at specific elements (labels like L1 or text) when explaining parts of the page or highlighting answers. This helps the user see exactly what you are referring to.
 
 6. PROACTIVE BEHAVIOR:
-   - You will receive [SYSTEM OBSERVATION] or [Updated page context]. 
+   - You will receive [SYSTEM OBSERVATION] or [Updated page context].
    - If you receive a [SYSTEM OBSERVATION], you MUST share a brief, witty, or helpful spoken comment about it with the user.
    - If you receive an [Updated page context], only speak if the user is waiting for a result or if something changed drastically. Otherwise, stay silent.`;
 
@@ -108,6 +114,18 @@ const TOOL_DECLARATIONS = [
         text: { type: 'string', description: 'A short explanation to show in the bubble (1-2 sentences).' },
       },
       required: ['element', 'text'],
+    },
+  },
+  {
+    name: 'scroll_page',
+    description: 'Scroll the current page up or down. Use for "scroll down", "scroll up", "go to the top", "go to the bottom", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        direction: { type: 'string', enum: ['up', 'down', 'top', 'bottom'], description: 'Direction to scroll.' },
+        amount: { type: 'number', description: 'Pixels to scroll (default 400). Ignored when direction is top or bottom.' },
+      },
+      required: ['direction'],
     },
   },
 ];
@@ -378,6 +396,11 @@ async function executeTool(name, args) {
             return 'Could not click — page may still be loading';
           }
         }
+        // If content.js returned an href, navigate via chrome.tabs.update (bypasses all JS routing)
+        if (res?.href) {
+          await chrome.tabs.update(tab.id, { url: res.href });
+          return `Navigated to "${args.text}"`;
+        }
         return res?.found ? `Clicked "${args.text}"` : `Could not find "${args.text}"`;
       }
       case 'open_new_tab': {
@@ -399,6 +422,12 @@ async function executeTool(name, args) {
         if (!match) return `No open tab matching "${args.query}"`;
         await chrome.tabs.update(match.id, { active: true });
         return `Switched to tab: ${match.title}`;
+      }
+      case 'scroll_page': {
+        const dir = args.direction?.toLowerCase();
+        const amount = args.amount || 400;
+        await chrome.tabs.sendMessage(tab.id, { type: 'scroll_page', direction: dir, amount });
+        return `Scrolled ${dir}`;
       }
       default:
         return `Unknown tool: ${name}`;
@@ -537,6 +566,24 @@ async function captureScreenshot() {
 
     sendToSidePanel({ type: 'screenshot-taken' });
 
+    // Get current page URL + text to ground the observation
+    let pageUrl = '';
+    let pageText = '';
+    try {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (activeTab) {
+        pageUrl = activeTab.url || '';
+        try {
+          const res = await chrome.tabs.sendMessage(activeTab.id, { type: 'get_page_text' });
+          if (res?.text) pageText = res.text.slice(0, 3000);
+        } catch (e) {}
+      }
+    } catch (e) {}
+
+    const observationPrompt = pageText
+      ? `You are observing a browser tab. The user is on this page:\nURL: ${pageUrl}\n\nPAGE TEXT:\n${pageText}\n\nLooking at the screenshot of this page, briefly comment if something is genuinely interesting or notable ABOUT THIS SPECIFIC PAGE — 1 sentence max. Base your comment only on what is actually on this page. If nothing notable, respond with exactly: "."`
+      : `You are observing a browser tab at URL: ${pageUrl}\n\nBriefly comment if something is genuinely interesting about this page — 1 sentence max. Base your comment only on what is visible in the screenshot. If nothing notable, respond with exactly: "."`;
+
     // Use REST API for silent text-only observation (not Live, to avoid unwanted audio)
     const url = `${REST_BASE}/${REST_MODEL}:generateContent?key=${apiKey}`;
     const res = await fetch(url, {
@@ -545,7 +592,7 @@ async function captureScreenshot() {
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [
           { inlineData: { mimeType: 'image/jpeg', data: base64 } },
-          { text: 'Briefly observe this page. Only comment if something is genuinely interesting — 1 sentence max. If nothing notable, respond with exactly: "."' },
+          { text: observationPrompt },
         ] }],
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         generationConfig: { thinkingConfig: { thinkingBudget: 0 } },

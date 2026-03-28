@@ -27,7 +27,10 @@ let musicAudio = null;
 let musicVol = 0.25;
 let currentMusicDataUrl = null;
 let turnTimeout = null;
-let chatHistory = []; // { role: 'user'|'agent'|'status', text: string }
+let chatHistory = []; // { role: 'user'|'agent', text: string }
+let currentAgentBubble = null;  // Live streaming bubble element
+let currentAgentText = '';      // Accumulated text for the current agent turn
+let currentAgentHasAudio = false; // Whether current turn had audio (for placeholder)
 
 function startTurnTimeout(ms = 15000) {
   clearTurnTimeout();
@@ -256,43 +259,65 @@ function handleBackgroundMessage(msg) {
     case 'agent-status':
       if (msg.connected) {
         statusDot.classList.add('connected');
-        setCommentary('Connected. Ready.', false);
+        setStatusBar('Connected. Ready.');
       } else {
         statusDot.classList.remove('connected');
-        setCommentary('Disconnected.', true);
+        setStatusBar('Disconnected.');
       }
       break;
 
     case 'agent-turn-start':
-      // New response — clear any old queued audio
+      // New agent turn — create a fresh streaming bubble
       if (agentThinking) agentThinking.classList.remove('hidden');
       stopVoicePlayback();
+      currentAgentText = '';
+      currentAgentHasAudio = false;
+      currentAgentBubble = createStreamingBubble();
       break;
 
     case 'agent-text':
       if (!msg.text || msg.text === 'Thinking...') break;
-      addMessage('agent', msg.text);
+      appendToStreamingBubble(msg.text);
       break;
 
     case 'agent-audio':
       if (msg.data) {
+        currentAgentHasAudio = true;
         queuePCMAudio(msg.data);
       }
       break;
 
     case 'agent-status-text':
-      setCommentary(msg.text, false);
+      // Tool-use status — update status bar only, not chat history
+      setStatusBar(msg.text);
       break;
 
     case 'agent-turn-complete':
       if (agentThinking) agentThinking.classList.add('hidden');
       clearTurnTimeout();
-      setTimeout(() => {
-        if (!isRecording) {
-          setCommentary('GEORGE_LIVE: WATCHING', false);
+      // If audio-only response, add a voice placeholder so the turn is visible
+      if (!currentAgentText && currentAgentHasAudio) {
+        currentAgentText = '🔊 [voice response]';
+        if (currentAgentBubble) {
+          currentAgentBubble.textContent = currentAgentText;
+          currentAgentBubble.style.opacity = '0.6';
+          currentAgentBubble.style.fontStyle = 'italic';
         }
+      }
+      commitStreamingBubble();
+      currentAgentHasAudio = false;
+      setTimeout(() => {
+        if (!isRecording) setStatusBar('GEORGE_LIVE: WATCHING');
       }, 1500);
       break;
+
+    case 'user-transcript': {
+      // Show spoken words as a user bubble (final transcript only)
+      if (msg.isFinal && msg.text && msg.text.trim()) {
+        addMessage('user', msg.text.trim());
+      }
+      break;
+    }
 
     case 'agent-error':
       setCommentary('Error: ' + msg.error, true);
@@ -388,22 +413,10 @@ function stopMusicAudio() {
 // ─── History Management ─────────────────────────────────────────────────────
 
 function addMessage(role, text) {
-  if (!text) return;
-  
-  // Status messages are temporary and shouldn't bloat history if possible,
-  if (role !== 'status') {
-    chatHistory.push({ role, text });
-    if (chatHistory.length > 50) chatHistory.shift();
-    saveHistory();
-  } else {
-    // If it's a status message, we might want to show it in the thinking/status area
-    if (agentThinking) {
-      agentThinking.textContent = text.toUpperCase();
-      agentThinking.classList.remove('hidden');
-    }
-    return; // Don't render status in chat history for this design
-  }
-
+  if (!text || !text.trim()) return;
+  chatHistory.push({ role, text });
+  if (chatHistory.length > 100) chatHistory.shift();
+  saveHistory();
   renderMessage(role, text);
 }
 
@@ -411,15 +424,45 @@ function renderMessage(role, text) {
   const div = document.createElement('div');
   div.className = `message ${role}-msg`;
   div.textContent = text;
-  
-  // Remove any existing status or thinking messages
-  if (role === 'status') {
-    const existing = historyContainer.querySelectorAll('.status-msg');
-    existing.forEach(el => el.remove());
-  }
-
   historyContainer.appendChild(div);
   historyContainer.scrollTop = historyContainer.scrollHeight;
+  return div;
+}
+
+// ─── Streaming Bubble Helpers ────────────────────────────────────────────────
+
+function createStreamingBubble() {
+  const div = document.createElement('div');
+  div.className = 'message agent-msg streaming';
+  div.textContent = '...';
+  historyContainer.appendChild(div);
+  historyContainer.scrollTop = historyContainer.scrollHeight;
+  return div;
+}
+
+function appendToStreamingBubble(text) {
+  if (!text) return;
+  currentAgentText += (currentAgentText ? ' ' : '') + text;
+  if (currentAgentBubble) {
+    currentAgentBubble.textContent = currentAgentText;
+    historyContainer.scrollTop = historyContainer.scrollHeight;
+  }
+}
+
+function commitStreamingBubble() {
+  if (!currentAgentBubble) return;
+  currentAgentBubble.classList.remove('streaming');
+  // Save to history if there's real content
+  if (currentAgentText && currentAgentText.trim()) {
+    chatHistory.push({ role: 'agent', text: currentAgentText.trim() });
+    if (chatHistory.length > 100) chatHistory.shift();
+    saveHistory();
+  } else if (currentAgentBubble && !currentAgentText) {
+    // Remove empty bubble
+    currentAgentBubble.remove();
+  }
+  currentAgentBubble = null;
+  currentAgentText = '';
 }
 
 function saveHistory() {
@@ -428,7 +471,7 @@ function saveHistory() {
 
 function loadHistory() {
   chrome.storage.local.get('chatHistory', (data) => {
-    if (data.chatHistory) {
+    if (data.chatHistory && data.chatHistory.length) {
       chatHistory = data.chatHistory;
       historyContainer.innerHTML = '';
       chatHistory.forEach(m => renderMessage(m.role, m.text));
@@ -439,17 +482,17 @@ function loadHistory() {
 function clearHistory() {
   chatHistory = [];
   chrome.storage.local.remove('chatHistory');
-  historyContainer.innerHTML = '<div class="welcome-msg">History cleared. Agent standing by...</div>';
+  historyContainer.innerHTML = '<div class="welcome-msg">--- AGENT INITIALIZED ---</div>';
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-function setCommentary(text, idle = false) {
-  // Backwards compatibility or direct status updates
-  if (idle && !text.includes('Listening')) {
-    // Just a status update
-    addMessage('status', text);
-  } else {
-    // If it's a specific instruction, treat as agent message
-    addMessage('status', text);
-  }
+// ─── Status Bar (non-chat updates) ───────────────────────────────────────────
+function setStatusBar(text) {
+  if (!agentThinking) return;
+  agentThinking.textContent = text.toUpperCase();
+  agentThinking.classList.remove('hidden');
+}
+
+// ─── Legacy compat ───────────────────────────────────────────────────────────
+function setCommentary(text) {
+  setStatusBar(text);
 }
