@@ -6,6 +6,7 @@ const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const SYSTEM_PROMPT = `You are an intelligent, witty browsing companion built into the user's browser.
 You observe what the user is looking at via periodic screenshots and can hear them via microphone.
+You already have the page text included in every message — you do NOT need to fetch it.
 
 Your personality:
 - Curious and observant — you notice details others miss
@@ -13,17 +14,14 @@ Your personality:
 - Occasionally dry humor, always substantive
 - You speak in short, natural sentences — never walls of text
 
-You have tools to interact with the browser:
-- highlight_answer: visually highlight an element on the page and explain it
-- scroll_to_text: scroll to find text on the page
-- navigate_to_url: navigate to a URL
-- go_back: go back in browser history
-- reload_page: reload the current page
-- get_page_text: read all visible text on the page
+CRITICAL RULES — follow these exactly:
+1. DEFAULT BEHAVIOR: Respond with plain text. Most of the time you should just TALK — give a spoken answer without using any tools.
+2. When the user asks a QUESTION ("what is", "what's the difference", "explain", "tell me", "why", "how", "compare"), respond ONLY with text. Do NOT call any tool. You already have the page text in the message, so just read it and answer.
+3. ONLY use the highlight_answer tool when the user explicitly says "highlight" or "show me where".
+4. ONLY use navigate_to_url when the user explicitly asks to go to a website.
+5. When proactively commenting (not asked), keep it to 1-2 sentences.
 
-When the user asks about something on the page, use highlight_answer or scroll_to_text.
-When proactively commenting (not asked), keep it to 1-2 sentences. Only comment if something is genuinely interesting.
-Always respond concisely — your response will be spoken aloud.`;
+Your response will be spoken aloud — keep it concise (2-4 sentences for answers).`;
 
 const TOOL_DECLARATIONS = [
   {
@@ -36,17 +34,6 @@ const TOOL_DECLARATIONS = [
         explanation: { type: 'string', description: 'Spoken explanation to give while the element is highlighted.' },
       },
       required: ['text', 'explanation'],
-    },
-  },
-  {
-    name: 'scroll_to_text',
-    description: 'Find text on the page and scroll it into view.',
-    parameters: {
-      type: 'object',
-      properties: {
-        text: { type: 'string', description: 'The text string to find and scroll to.' },
-      },
-      required: ['text'],
     },
   },
   {
@@ -70,11 +57,6 @@ const TOOL_DECLARATIONS = [
     description: 'Reload the current page.',
     parameters: { type: 'object', properties: {} },
   },
-  {
-    name: 'get_page_text',
-    description: 'Get all visible text from the current page. Use this before answering questions about page content.',
-    parameters: { type: 'object', properties: {} },
-  },
 ];
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -86,6 +68,29 @@ let intervalMs = 60000;
 let lastScreenshotHash = null;
 let lastSpokeTime = 0;
 let lastScreenshotData = null; // raw base64 (no prefix)
+
+// ─── Conversation Memory ────────────────────────────────────────────────────
+// Stores recent conversation turns so the model has context
+const MAX_MEMORY_TURNS = 20;
+let conversationMemory = []; // [{role: 'user', text: '...'}, {role: 'model', text: '...'}]
+
+function addToMemory(role, text) {
+  if (!text) return;
+  // Keep text short in memory to avoid blowing up token count
+  const trimmed = text.slice(0, 500);
+  conversationMemory.push({ role, text: trimmed });
+  if (conversationMemory.length > MAX_MEMORY_TURNS) {
+    conversationMemory = conversationMemory.slice(-MAX_MEMORY_TURNS);
+  }
+}
+
+function buildMemoryContext() {
+  if (conversationMemory.length === 0) return '';
+  const lines = conversationMemory.map(m =>
+    m.role === 'user' ? `User: ${m.text}` : `You: ${m.text}`
+  );
+  return `[CONVERSATION HISTORY]\n${lines.join('\n')}\n[END CONVERSATION HISTORY]\n\n`;
+}
 
 // ─── Offscreen Document (for mic recording) ─────────────────────────────────
 
@@ -135,6 +140,7 @@ async function handleResponse(response) {
 
   const parts = candidate.content?.parts || [];
   let spokenText = null;
+  let toolExplanation = null;
 
   for (const part of parts) {
     if (part.functionCall) {
@@ -143,7 +149,10 @@ async function handleResponse(response) {
       const result = await executeTool(name, args || {});
 
       if (name === 'highlight_answer') {
-        spokenText = args.explanation || `I highlighted "${args.text}" on the page.`;
+        // Always speak the explanation, even if highlight didn't find the element
+        toolExplanation = args.explanation || `I highlighted "${args.text}" on the page.`;
+        // Don't set spokenText here — let model's text part take priority if present
+        continue;
       } else if (name === 'get_page_text') {
         // Fresh call with page text baked in (avoids multi-turn issues)
         try {
@@ -167,8 +176,10 @@ async function handleResponse(response) {
     }
   }
 
-  if (spokenText) {
-    sendToSidePanel({ type: 'agent-text', text: spokenText });
+  // Prefer model's text response; fall back to tool explanation
+  const finalText = spokenText || toolExplanation;
+  if (finalText) {
+    sendToSidePanel({ type: 'agent-text', text: finalText });
     lastSpokeTime = Date.now();
   }
   sendToSidePanel({ type: 'agent-turn-complete' });
@@ -310,23 +321,55 @@ async function sendAudio(audioBase64, mimeType) {
       parts.push({ inlineData: { mimeType: 'image/jpeg', data: lastScreenshotData } });
     }
 
-    // Include page text so model can go straight to highlight_answer
+    // Include full page text so model can answer questions directly
+    let pageText = '';
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab) {
         const res = await chrome.tabs.sendMessage(tab.id, { type: 'get_page_text' });
         if (res?.text) {
-          parts.push({ text: `Current page text:\n${res.text}\n\nThe user said:` });
+          pageText = res.text;
+          parts.push({ text: `${buildMemoryContext()}[FULL PAGE TEXT START]\n${res.text}\n[FULL PAGE TEXT END]\n\nThe user said:` });
         }
       }
     } catch (e) { /* ignore if content script not ready */ }
 
     parts.push({ inlineData: { mimeType, data: audioBase64 } });
 
+    // No tools — just answer directly
     const response = await generateContent(
       [{ role: 'user', parts }],
-      { tools: true }
+      { tools: false }
     );
+
+    const answer = response.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim();
+
+    if (answer) {
+      addToMemory('user', '[voice message]');
+      addToMemory('model', answer);
+      sendToSidePanel({ type: 'agent-text', text: answer });
+      lastSpokeTime = Date.now();
+
+      // If the user said "highlight" or "show me", also try to highlight
+      // We do this as a separate step after answering
+      if (pageText) {
+        try {
+          const highlightCheck = await generateContent([{
+            role: 'user',
+            parts: [{ text: `The user asked something and you answered: "${answer}"\n\nShould something be highlighted on the page? If so, respond with ONLY a short text snippet (5-15 words) from the page to highlight. If not, respond with exactly: NO` }],
+          }], { tools: false });
+          const snippet = highlightCheck.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim();
+          if (snippet && snippet !== 'NO' && snippet.length < 100) {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (tab) {
+              chrome.tabs.sendMessage(tab.id, { type: 'highlight_answer', text: snippet });
+            }
+          }
+        } catch (e) { /* highlight is optional, don't fail */ }
+      }
+    }
+
+    sendToSidePanel({ type: 'agent-turn-complete' });
 
     await handleResponse(response);
     lastSpokeTime = Date.now();
@@ -351,30 +394,37 @@ async function sendText(text) {
       parts.push({ inlineData: { mimeType: 'image/jpeg', data: lastScreenshotData } });
     }
 
-    // Include page text
+    // Include full page text
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab) {
         const res = await chrome.tabs.sendMessage(tab.id, { type: 'get_page_text' });
         if (res?.text) {
-          parts.push({ text: `Current page text:\n${res.text}\n\nThe user says: ${text}` });
+          parts.push({ text: `${buildMemoryContext()}[FULL PAGE TEXT START]\n${res.text}\n[FULL PAGE TEXT END]\n\nThe user says: ${text}` });
         } else {
-          parts.push({ text });
+          parts.push({ text: `${buildMemoryContext()}The user says: ${text}` });
         }
       } else {
-        parts.push({ text });
+        parts.push({ text: `${buildMemoryContext()}The user says: ${text}` });
       }
     } catch (e) {
-      parts.push({ text });
+      parts.push({ text: `${buildMemoryContext()}The user says: ${text}` });
     }
 
+    // No tools — just answer the question directly
     const response = await generateContent(
       [{ role: 'user', parts }],
-      { tools: true }
+      { tools: false }
     );
 
-    await handleResponse(response);
-    lastSpokeTime = Date.now();
+    const answer = response.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim();
+    if (answer) {
+      addToMemory('user', text);
+      addToMemory('model', answer);
+      sendToSidePanel({ type: 'agent-text', text: answer });
+      lastSpokeTime = Date.now();
+    }
+    sendToSidePanel({ type: 'agent-turn-complete' });
     return { success: true };
   } catch (e) {
     console.error('[Gemini] sendText failed:', e);

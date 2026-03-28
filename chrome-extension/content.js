@@ -8,7 +8,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const result = scrollToText(msg.text);
     sendResponse({ found: result });
   } else if (msg.type === 'get_page_text') {
-    sendResponse({ text: document.body.innerText.slice(0, 8000) });
+    sendResponse({ text: document.body.innerText.slice(0, 30000) });
   } else if (msg.type === 'inject_annotation') {
     injectAnnotation(msg.text, msg.x, msg.y, msg.duration);
     sendResponse({ ok: true });

@@ -80,14 +80,17 @@ freqSlider.addEventListener('input', () => {
   chrome.runtime.sendMessage({ action: 'set-frequency', value: parseFloat(freqSlider.value) });
 });
 
-// ─── Microphone / Voice Input ────────────────────────────────────────────────
-micBtn.addEventListener('mousedown', startRecording);
-micBtn.addEventListener('mouseup', stopRecording);
-micBtn.addEventListener('mouseleave', () => { if (isRecording) stopRecording(); });
+// ─── Microphone / Voice Input (toggle mode) ─────────────────────────────────
+// Click once to start, click again to stop
+micBtn.addEventListener('click', toggleRecording);
 
-// Touch support
-micBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
-micBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); });
+function toggleRecording() {
+  if (isRecording) {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+}
 
 async function startRecording() {
   if (isRecording) return;
@@ -106,7 +109,7 @@ async function startRecording() {
     isRecording = true;
     micBtn.classList.add('recording');
     statusDot.classList.add('recording');
-    setCommentary('Listening...', false);
+    setCommentary('Listening... (click mic to stop)', false);
   });
 }
 
