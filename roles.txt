@@ -1,0 +1,27 @@
+Using the "context.txt," let's build Project Specter. Split your brain into these two roles:
+
+ROLE 1: The Automation Engineer (Selenium & Logic)
+Focus: Controlling the Chromium instance, executing DOM-level highlights, reverting HTML changes, and mapping voice commands to browser actions (scrolling/navigation).
+
+ROLE 2: The Multimodal Lead (Live API & Audio)
+Focus: Establishing the Gemini Live WebSocket, handling continuous audio streaming, processing the AI's PCM audio output, and managing the "Pulse" of screenshots.
+
+BUILD PLAN (Section by Section):
+
+SECTION 1: The Electron & Selenium "Handshake"
+- Setup Electron to launch/attach to a Chromium executable.
+- Basic "Hello World" of modifying and reverting a page's background color via Selenium.
+
+SECTION 2: The Live WebSocket & Audio Stream
+- Connecting to Gemini Multimodal Live API from Electron.
+- Setting up the "Microphone -> WebSocket -> Speakers" pipeline.
+
+SECTION 3: The "Visual Feedback" Engine
+- Logic for: "AI detects answer" -> "Architect injects highlight" -> "Audio explains" -> "Revert HTML."
+
+SECTION 4: Verbal Browsing & Navigation
+- Voice-to-Action mapping for scrolling and searching within the browser.
+
+SECTION 5: Background Music (Last Priority)
+
+Are you ready to start with SECTION 1? Please provide the Electron main.js setup and the Selenium script to control a Chromium exe.
