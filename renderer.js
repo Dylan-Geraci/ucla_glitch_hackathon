@@ -23,12 +23,8 @@ const loadingDot     = document.getElementById('loading-dot');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let isRecording = false;
-let recordingStream = null;
-let recordingCtx = null;
-let recordingProcessor = null;
-let pcmChunks = [];
-let audioQueue = [];
-let isPlayingAudio = false;
+let mediaRecorder = null;
+let audioChunks = [];
 
 // ─── Setup / Connect ─────────────────────────────────────────────────────────
 connectBtn.addEventListener('click', async () => {
@@ -121,32 +117,30 @@ micBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording()
 async function startRecording() {
   if (isRecording) return;
   try {
-    recordingStream = await navigator.mediaDevices.getUserMedia({
-      audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true },
-    });
-    pcmChunks = [];
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioChunks = [];
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
 
-    // ScriptProcessor captures raw PCM at 16kHz — Gemini Live requires this format
-    recordingCtx = new AudioContext({ sampleRate: 16000 });
-    const source = recordingCtx.createMediaStreamSource(recordingStream);
-    recordingProcessor = recordingCtx.createScriptProcessor(4096, 1, 1);
-
-    recordingProcessor.onaudioprocess = (e) => {
-      const float32 = e.inputBuffer.getChannelData(0);
-      const int16 = new Int16Array(float32.length);
-      for (let i = 0; i < float32.length; i++) {
-        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-      }
-      pcmChunks.push(int16);
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
     };
 
-    // Silent gain node: ScriptProcessor must connect to destination to fire, but we don't want feedback
-    const silence = recordingCtx.createGain();
-    silence.gain.value = 0;
-    source.connect(recordingProcessor);
-    recordingProcessor.connect(silence);
-    silence.connect(recordingCtx.destination);
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      const arrayBuffer = await blob.arrayBuffer();
+      // btoa in chunks to avoid call-stack overflow
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 8192) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      }
+      const base64 = btoa(binary);
+      setCommentary('Thinking…', false);
+      window.agent.sendVoiceMessage({ audioBase64: base64, mimeType: 'audio/webm' });
+    };
 
+    mediaRecorder.start();
     isRecording = true;
     micBtn.classList.add('recording');
     statusDot.classList.add('recording');
@@ -158,36 +152,11 @@ async function startRecording() {
 }
 
 function stopRecording() {
-  if (!isRecording || !recordingProcessor) return;
+  if (!isRecording || !mediaRecorder) return;
   isRecording = false;
+  mediaRecorder.stop();
   micBtn.classList.remove('recording');
   statusDot.classList.remove('recording');
-
-  recordingProcessor.disconnect();
-  recordingStream.getTracks().forEach(t => t.stop());
-  recordingCtx.close();
-
-  // Combine all PCM chunks and base64-encode
-  const totalLen = pcmChunks.reduce((sum, c) => sum + c.length, 0);
-  const combined = new Int16Array(totalLen);
-  let offset = 0;
-  for (const chunk of pcmChunks) { combined.set(chunk, offset); offset += chunk.length; }
-
-  // btoa in chunks to avoid call-stack overflow on large buffers
-  const bytes = new Uint8Array(combined.buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 8192) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-  }
-  const base64 = btoa(binary);
-
-  setCommentary('Thinking…', false);
-  window.agent.sendVoiceMessage({ audioBase64: base64, mimeType: 'audio/pcm;rate=16000' });
-
-  recordingStream = null;
-  recordingCtx = null;
-  recordingProcessor = null;
-  pcmChunks = [];
 }
 
 // ─── Agent Events ─────────────────────────────────────────────────────────────
@@ -201,19 +170,20 @@ window.agent.on('agent-status', ({ connected }) => {
   }
 });
 
-window.agent.on('agent-text', ({ text, commands }) => {
-  if (text) setCommentary(text, false);
-  if (commands && commands.length > 0) executeCommands(commands);
-});
-
-window.agent.on('agent-audio', ({ data, mimeType }) => {
-  setCommentary('Speaking…', false);
-  enqueueAudio(data, mimeType);
+window.agent.on('agent-text', ({ text }) => {
+  if (!text) return;
+  setCommentary(text, false);
+  // Speak the response aloud using browser TTS
+  window.speechSynthesis.cancel(); // stop any in-progress speech
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 1.05;
+  utterance.onend = () => setCommentary('Agent active — watching…', false);
+  window.speechSynthesis.speak(utterance);
 });
 
 window.agent.on('agent-turn-complete', () => {
-  // If no audio queued, turn is text-only or empty — reset commentary
-  if (audioQueue.length === 0 && !isPlayingAudio) {
+  // Only reset if nothing is being spoken
+  if (!window.speechSynthesis.speaking) {
     setCommentary('Agent active — watching…', false);
   }
 });
@@ -248,50 +218,6 @@ async function executeCommands(commands) {
   }
 }
 
-// ─── Audio Playback Queue ─────────────────────────────────────────────────────
-function enqueueAudio(base64Data, mimeType) {
-  audioQueue.push({ base64Data, mimeType });
-  if (!isPlayingAudio) playNextAudio();
-}
-
-async function playNextAudio() {
-  if (audioQueue.length === 0) { isPlayingAudio = false; return; }
-  isPlayingAudio = true;
-
-  const { base64Data } = audioQueue.shift();
-  try {
-    // Gemini returns raw PCM Int16 LE at 24kHz — browsers can't play this with new Audio()
-    // Decode manually: base64 → Int16 → Float32 → AudioContext buffer
-    const binary = atob(base64Data);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-    const int16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
-
-    const audioCtx = new AudioContext({ sampleRate: 24000 });
-    const buffer = audioCtx.createBuffer(1, float32.length, 24000);
-    buffer.getChannelData(0).set(float32);
-
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioCtx.destination);
-    source.onended = () => {
-      audioCtx.close();
-      if (audioQueue.length === 0) {
-        isPlayingAudio = false;
-        setCommentary('Agent active — watching…', false);
-      } else {
-        playNextAudio();
-      }
-    };
-    source.start();
-  } catch (e) {
-    console.error('Audio playback error:', e);
-    playNextAudio();
-  }
-}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function setCommentary(text, idle = false) {
