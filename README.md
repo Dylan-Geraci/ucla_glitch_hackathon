@@ -47,7 +47,7 @@ npm install
 
 ### 2. Get a Gemini API key
 
-Go to [Google AI Studio](https://aistudio.google.com/app/apikey) and create an API key with access to **Gemini 2.0 Flash Live**.
+Go to [Google AI Studio](https://aistudio.google.com/app/apikey) and create an API key.
 
 ### 3. Run the app
 
@@ -83,28 +83,9 @@ Enter your API key in the setup screen. It's stored locally in localStorage.
 
 | Model | Purpose |
 |---|---|
-| **Gemini 2.0 Flash Live** | Real-time multimodal: understands screenshots + voice, responds with voice |
-| **Lyria** *(next phase)* | Ambient background music matching page tone |
-
----
-
-## Roadmap
-
-- [x] BrowserView embedded browser
-- [x] Gemini Live voice I/O
-- [x] Periodic screenshot → proactive commentary
-- [x] Mic hold-to-talk
-- [x] DOM highlight / annotate / scroll
-- [x] Frequency slider
-- [ ] Lyria ambient music integration
-- [ ] Music mood mapping from page content
-- [ ] User music preference controls
-- [ ] Session memory / context window management
-- [ ] Multiple voice options
-
----
-
-## Notes
+| **Gemini 3.1 Flash Live** | Real-time multimodal: understands screenshots + voice, responds with voice |
+| **Gemini 3.1 Flash lite** |
+| **Lyria** | Ambient background music matching page tone |
 
 - Screenshots are captured from the BrowserView and sent **directly to Google's API** — no backend server
 - Audio is recorded in the renderer and sent via IPC to the main process, then to Gemini
